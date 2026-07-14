@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>账号交易爬虫</title>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        bg: '#0F172A', card: '#1E293B', muted: '#334155',
+        fg: '#E2E8F0', accent: '#D97706',
+        pxb7: '#7C3AED', pzds: '#3B82F6',
+      }
+    }
+  }
+}
+</script>
+<style>
+  body { background: #0F172A; color: #E2E8F0; font-family: system-ui, -apple-system, sans-serif; }
+  .card-hover { transition: border-color .2s, transform .15s; }
+  .card-hover:hover { border-color: #3B82F6; transform: translateY(-2px); }
+  .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .skeleton { background: linear-gradient(90deg, #1E293B 25%, #334155 50%, #1E293B 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="border-b border-slate-700/50 px-4 py-3">
+    <div class="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-2">
+      <h1 class="text-lg font-bold tracking-wide">🎮 账号交易爬虫</h1>
+      <div class="flex gap-4 text-sm text-slate-400">
+        <span v-if="stats.total">在售 <b class="text-fg">{{ stats.total }}</b></span>
+        <span v-for="s in stats.by_source" class="text-xs px-2 py-0.5 rounded-full" :class="s.source==='pxb7'?'bg-purple-900/30 text-purple-300':'bg-blue-900/30 text-blue-300'">
+          {{ sourceName(s.source) }} {{ s.count }}
+        </span>
+        <span v-if="stats.sold" class="text-slate-500">已售 {{ stats.sold }}</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap gap-2 items-center">
+    <select v-model="filters.source" @change="search" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm text-fg">
+      <option value="">全部来源</option>
+      <option v-for="(name, key) in mappings.sources" :value="key">{{ name }}</option>
+    </select>
+    <select v-model="filters.game_name" @change="search" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm text-fg">
+      <option value="">全部游戏</option>
+      <option v-for="(ids, name) in mappings.games" :value="name">{{ name }}</option>
+    </select>
+    <input v-model="filters.keyword" @keyup.enter="search" placeholder="搜索标题..." class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm text-fg placeholder-slate-500 flex-1 min-w-[140px]">
+    <input v-model.number="filters.min_price" @keyup.enter="search" placeholder="最低价" type="number" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm text-fg w-24">
+    <span class="text-slate-500">-</span>
+    <input v-model.number="filters.max_price" @keyup.enter="search" placeholder="最高价" type="number" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm text-fg w-24">
+    <select v-model="sort" @change="search" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm text-fg">
+      <option value="created_at">最新</option>
+      <option value="price_asc">价格↑</option>
+      <option value="price_desc">价格↓</option>
+    </select>
+    <label class="flex items-center gap-1 text-sm text-slate-400 cursor-pointer ml-auto">
+      <input type="checkbox" v-model="filters.include_sold" @change="search" class="rounded bg-card border-slate-600"> 含已售
+    </label>
+  </div>
+
+  <main class="max-w-7xl mx-auto px-4 pb-8">
+    <div v-if="loading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <div v-for="n in 8" class="bg-card rounded-lg p-3 border border-slate-700/50">
+        <div class="skeleton h-40 rounded mb-3"></div>
+        <div class="skeleton h-4 w-16 rounded mb-2"></div>
+        <div class="skeleton h-5 w-full rounded mb-2"></div>
+        <div class="skeleton h-6 w-20 rounded"></div>
+      </div>
+    </div>
+
+    <div v-else-if="!items.length" class="text-center py-20 text-slate-500">
+      <p class="text-lg mb-2">暂无数据</p>
+      <p class="text-sm">启动爬虫后等待首次采集完成</p>
+    </div>
+
+    <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <a v-for="item in items" :key="item.id" :href="detailUrl(item)" target="_blank"
+         class="card-hover bg-card rounded-lg overflow-hidden border border-slate-700/50 flex flex-col">
+        <div class="aspect-[4/3] bg-slate-800 flex items-center justify-center overflow-hidden">
+          <img v-if="coverUrl(item)" :src="coverUrl(item)" :alt="item.title" class="w-full h-full object-cover" loading="lazy"
+               @error="$event.target.style.display='none'">
+          <span v-if="!coverUrl(item)" class="text-slate-600 text-4xl">🎮</span>
+        </div>
+        <div class="p-3 flex flex-col gap-2 flex-1">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-xs px-2 py-0.5 rounded-full font-medium"
+                  :class="item.source==='pxb7'?'bg-purple-900/50 text-purple-300':'bg-blue-900/50 text-blue-300'">
+              {{ sourceName(item.source) }}
+            </span>
+            <span class="text-xs text-slate-500">{{ gameName(item) }}</span>
+            <span v-if="!item.is_active" class="text-xs px-2 py-0.5 rounded-full bg-red-900/30 text-red-400">已售</span>
+          </div>
+          <p class="text-sm text-slate-300 line-clamp-2 leading-relaxed flex-1">{{ item.title }}</p>
+          <div class="flex items-end justify-between">
+            <span class="text-lg font-bold text-amber-400">¥{{ item.price.toLocaleString() }}</span>
+            <span class="text-xs text-slate-500">{{ timeAgo(item.created_at) }}</span>
+          </div>
+        </div>
+      </a>
+    </div>
+
+    <div v-if="totalPages > 1" class="flex justify-center gap-2 mt-6">
+      <button @click="goPage(page-1)" :disabled="page<=1" class="px-3 py-1.5 rounded text-sm bg-card border border-slate-600 disabled:opacity-30 hover:border-slate-400">上一页</button>
+      <template v-for="p in pageNumbers" :key="p">
+        <button v-if="p==='...'" class="px-3 py-1.5 text-sm text-slate-500">...</button>
+        <button v-else @click="goPage(p)" class="px-3 py-1.5 rounded text-sm" :class="p===page?'bg-accent text-black font-medium':'bg-card border border-slate-600 hover:border-slate-400'">{{ p }}</button>
+      </template>
+      <button @click="goPage(page+1)" :disabled="page>=totalPages" class="px-3 py-1.5 rounded text-sm bg-card border border-slate-600 disabled:opacity-30 hover:border-slate-400">下一页</button>
+    </div>
+  </main>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted } = Vue
+
+createApp({
+  setup() {
+    const stats = ref({})
+    const items = ref([])
+    const loading = ref(false)
+    const page = ref(1)
+    const total = ref(0)
+    const size = ref(20)
+    const sort = ref('created_at')
+    const filters = ref({ source: '', game_name: '', keyword: '', min_price: null, max_price: null, include_sold: false })
+    const mappings = ref({ sources: {}, games: {} })
+    const gameLookup = ref({})  // "source:game_id" → "游戏名"
+
+    function buildGameLookup() {
+      const lookup = {}
+      for (const [name, ids] of Object.entries(mappings.value.games)) {
+        for (const [src, gid] of Object.entries(ids)) {
+          lookup[`${src}:${gid}`] = name
+        }
+      }
+      gameLookup.value = lookup
+    }
+
+    const totalPages = computed(() => Math.ceil(total.value / size.value) || 1)
+    const pageNumbers = computed(() => {
+      const p = page.value, t = totalPages.value, r = []
+      if (t <= 7) { for (let i = 1; i <= t; i++) r.push(i); return r }
+      r.push(1)
+      if (p > 3) r.push('...')
+      for (let i = Math.max(2, p-1); i <= Math.min(t-1, p+1); i++) r.push(i)
+      if (p < t-2) r.push('...')
+      r.push(t)
+      return r
+    })
+
+    function sourceName(key) { return mappings.value.sources[key] || key }
+    function gameName(item) { return gameLookup.value[`${item.source}:${item.game_id}`] || item.game_id }
+
+    function coverUrl(item) {
+      try {
+        const d = typeof item.raw_data === 'string' ? JSON.parse(item.raw_data) : item.raw_data
+        return d.mainImageUrl || d.productMiniImageUrl || d.main_image_url || ''
+      } catch { return '' }
+    }
+    function detailUrl(item) {
+      try {
+        const d = typeof item.raw_data === 'string' ? JSON.parse(item.raw_data) : item.raw_data
+        if (item.source === 'pxb7') return `https://www.pxb7.com/product/${d.productId || item.product_id}/1`
+        if (item.source === 'pzds') return `https://www.pzds.com${d.url || '/goodsDetails/' + item.product_id + '/6'}`
+      } catch {}
+      return '#'
+    }
+    function timeAgo(t) {
+      if (!t) return ''
+      const diff = (Date.now() - new Date(t + 'Z').getTime()) / 1000
+      if (diff < 60) return '刚刚'
+      if (diff < 3600) return Math.floor(diff/60) + '分钟前'
+      if (diff < 86400) return Math.floor(diff/3600) + '小时前'
+      return Math.floor(diff/86400) + '天前'
+    }
+
+    async function fetchMappings() {
+      try { mappings.value = await (await fetch('/api/mappings')).json(); buildGameLookup() } catch {}
+    }
+    async function fetchStats() {
+      try { stats.value = await (await fetch('/api/stats')).json() } catch {}
+    }
+    async function fetchData() {
+      const p = new URLSearchParams()
+      if (filters.value.source) p.set('source', filters.value.source)
+      if (filters.value.game_name) p.set('game_name', filters.value.game_name)
+      if (filters.value.keyword) p.set('keyword', filters.value.keyword)
+      if (filters.value.min_price != null) p.set('min_price', filters.value.min_price)
+      if (filters.value.max_price != null) p.set('max_price', filters.value.max_price)
+      if (filters.value.include_sold) p.set('include_sold', 'true')
+      p.set('page', page.value); p.set('size', size.value)
+      try {
+        const r = await (await fetch('/api/accounts?' + p)).json()
+        items.value = r.items || []; total.value = r.total || 0
+      } catch {} finally { loading.value = false }
+    }
+    function search() { loading.value = true; page.value = 1; fetchData() }
+    function goPage(p) {
+      if (p < 1 || p > totalPages.value) return
+      page.value = p; fetchData(); window.scrollTo(0, 0)
+    }
+
+    onMounted(() => { fetchMappings(); fetchStats(); fetchData() })
+    return { stats, items, loading, page, total, totalPages, pageNumbers, filters, sort, mappings, sourceName, gameName, coverUrl, detailUrl, timeAgo, search, goPage }
+  }
+}).mount('#app')
+</script>
+</body>
+</html>

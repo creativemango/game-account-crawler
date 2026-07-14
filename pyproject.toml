@@ -1,0 +1,16 @@
+[project]
+name = "game-account-crawler"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx",
+    "fastapi",
+    "uvicorn",
+    "pyyaml",
+    "numpy",
+    "patchright",
+    "lightgbm>=4.6.0",
+]
+
+[dependency-groups]
+dev = []
