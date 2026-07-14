@@ -82,16 +82,16 @@ class PzdsApiClient:
         )
         self._page = await self._context.new_page()
 
-        # 监听 goodsPublic/page 响应
+        # 监听 goodsPublic/page 响应（放宽检查: 任何 JSON 响应都捕获）
         async def on_response(response):
             if "goodsPublic/page" in response.url:
                 try:
                     body = await response.text()
                     if body.strip().startswith("{"):
                         data = json.loads(body)
-                        if "data" in data and "records" in data.get("data", {}):
-                            self._last_json_response = data
-                            self._response_event.set()
+                        logger.debug("goodsPublic/page 响应: keys=%s", list(data.keys())[:5])
+                        self._last_json_response = data
+                        self._response_event.set()
                 except Exception:
                     pass
 
@@ -179,6 +179,8 @@ class PzdsApiClient:
             # 滚动到底部触发下一页加载
             self._response_event.clear()
             await self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            # 给页面一点时间触发滚动事件和发起请求
+            await self._page.wait_for_timeout(500)
 
         # 等待 JSON 响应
         try:
