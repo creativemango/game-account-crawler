@@ -238,6 +238,21 @@ def get_account(account_id: int):
     return dict(row) if row else None
 
 
+def get_account_id(source: str, product_id: str) -> int | None:
+    """按 source + product_id 查询账号 id
+
+    用于 upsert_account 之后获取 account_id，以便调用 upsert_detail。
+    accounts 表有 UNIQUE(source, product_id) 约束，查询唯一。
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT id FROM accounts WHERE source=? AND product_id=?",
+        (source, product_id),
+    ).fetchone()
+    conn.close()
+    return row["id"] if row else None
+
+
 def get_stats():
     conn = get_db()
     total = conn.execute("SELECT COUNT(*) FROM accounts WHERE is_active=1").fetchone()[0]
