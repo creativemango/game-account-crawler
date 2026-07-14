@@ -395,8 +395,13 @@ async def _crawl_async(
     platform: str,
     max_pages: int,
     page_size: int,
+    start_page: int = 1,
 ) -> list[dict]:
-    """异步爬取商品列表，翻页直到无数据或达到 max_pages"""
+    """异步爬取商品列表，翻页直到无数据或达到 max_pages
+
+    Args:
+        start_page: 起始页码（默认 1，回填场景可从第 N 页开始）
+    """
     results: list[dict] = []
     try:
         client = await _get_client(game_id, platform)
@@ -404,7 +409,8 @@ async def _crawl_async(
         raise CrawlerError(f"浏览器启动失败: {e}")
 
     key = f"{game_id}:{platform}"
-    for page in range(1, max_pages + 1):
+    # 从 start_page 开始翻 max_pages 页
+    for page in range(start_page, start_page + max_pages):
         try:
             data = await client.fetch_goods_page(page=page, page_size=page_size)
         except Exception as e:
@@ -440,6 +446,7 @@ def crawl(
     platform: str = "6",
     max_pages: int = 1,
     page_size: int = 10,
+    start_page: int = 1,
 ) -> list[dict]:
     """爬取商品列表（同步接口，供 main.py 线程调用）
 
@@ -448,13 +455,14 @@ def crawl(
         platform: 商品分类ID（"6"=成品号）
         max_pages: 最多翻页数
         page_size: 每页数量
+        start_page: 起始页码（默认 1，回填场景可从第 N 页开始）
 
     Returns:
         标准化 dict 列表: [{source, game_id, product_id, title, price, raw_data}, ...]
     """
     loop = _get_loop()
     return loop.run_until_complete(
-        _crawl_async(game_id, platform, max_pages, page_size)
+        _crawl_async(game_id, platform, max_pages, page_size, start_page=start_page)
     )
 
 
