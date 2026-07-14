@@ -7,8 +7,15 @@ DETAIL_API = "https://api-pc.pxb7.com/api/product/web/product/detailPost"
 TITLE_API = "https://api-pc.pxb7.com/api/search/product/selectTitleByCode"
 
 
-def crawl(game_id: str, page_size: int = 16, max_pages: int = 3) -> list[dict]:
-    """爬取列表页，返回标准化 dict"""
+def crawl(game_id: str, page_size: int = 16, max_pages: int = 3, start_page: int = 1) -> list[dict]:
+    """爬取列表页，返回标准化 dict
+
+    Args:
+        game_id: 游戏 ID
+        page_size: 每页条数
+        max_pages: 最多爬取的页数
+        start_page: 起始页码（默认 1，向后兼容；backfill 场景可从第 N 页开始）
+    """
     results = []
 
     with httpx.Client(timeout=30, trust_env=False, headers={
@@ -18,7 +25,8 @@ def crawl(game_id: str, page_size: int = 16, max_pages: int = 3) -> list[dict]:
         "Referer": "https://www.pxb7.com/",
         "Origin": "https://www.pxb7.com",
     }) as client:
-        for page_index in range(1, max_pages + 1):
+        # 从 start_page 开始向后翻 max_pages 页
+        for page_index in range(start_page, start_page + max_pages):
             resp = client.post(LIST_API, json={
                 "query": "",
                 "gameId": game_id,
