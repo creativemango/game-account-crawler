@@ -1,22 +1,15 @@
-"""pzds.com（盼之）爬虫 — Playwright + webpack 拦截 + WASM 签名
+"""pzds.com（盼之）爬虫 — Playwright + 响应监听 + 滚动翻页
 
-替换原 SSR HTML 解析方案，改用 API 直接获取结构化数据。
+替换原 webpack 拦截 + WASM 签名方案（盼之改版后 webpack 全局变量不再暴露）。
 
 原理:
   1. patchright 启动浏览器，打开 https://www.pzds.com/goodsList/{game_id}/{catalogue}
-  2. webpack 拦截获取 generateSign 函数 (WASM 签名)
-  3. 从页面真实请求中获取 deviceid/globalid
-  4. 每次请求: generateSign(bodyStr, 'POST', timestamp, random) → 用页面 fetch 发请求
-     (2.js hook 自动添加 decode__1174 URL 参数)
-  5. 手动设置完整签名头 (sign/pztimestamp/random/x-sign-version 等)
-
-goodsPublic/page 是 WASM 签名 API，无法纯算，必须浏览器内执行。
-依赖: patchright (反检测 Playwright)
+  2. 首次加载触发阿里云 WAF JS 挑战，刷新后通过验证
+  3. 监听 goodsPublic/page 响应，捕获 JSON 数据
+  4. 翻页: 滚动到底部触发下一页加载（页面自身签名逻辑工作）
+  5. 详情页: 从 __NUXT__.data[0].detailsData 提取 SSR 数据
 """
-from __future__ import annotations
-
 import asyncio
-import atexit
 import json
 import logging
 from typing import Any
@@ -31,101 +24,12 @@ API_BASE = "https://api.pzds.com"
 GOODS_PAGE_API = f"{API_BASE}/api/web-client/v2/public/goodsPublic/page"
 BASE_URL = "https://www.pzds.com"
 
-# webpack 拦截脚本 (注入到页面 init_script，在页面 JS 之前执行)
-WEBPACK_INJECT = """
-window.__nativeFetch__ = window.fetch.bind(window);
-window.__webpack_require__ = null;
-window.__steal_done__ = false;
-let wpv = [];
-Object.defineProperty(window, 'webpackJsonp', {
-    get() { return wpv; },
-    set(val) {
-        wpv = val;
-        const op = val.push.bind(val);
-        val.push = function(chunk) {
-            try {
-                let modules = Array.isArray(chunk[0]) ? chunk[1] : chunk[1];
-                if (modules && typeof modules === 'object' && !window.__steal_done__) {
-                    const ids = Object.keys(modules);
-                    if (ids.length > 0) {
-                        const fid = ids[0];
-                        const orig = modules[fid];
-                        modules[fid] = function(m, e, r) {
-                            if (!window.__steal_done__) {
-                                window.__webpack_require__ = r;
-                                window.__webpack_cache__ = r.c;
-                                window.__steal_done__ = true;
-                            }
-                            orig(m, e, r);
-                        };
-                    }
-                }
-            } catch(err) {}
-            return op(chunk);
-        };
-    },
-    configurable: true,
-});
-"""
-
-# 签名 + 请求 JS (在浏览器上下文执行)
-SIGN_AND_FETCH_JS = """
-async ({apiUrl, bodyStr, deviceid, globalid}) => {
-    const cache = window.__webpack_cache__;
-
-    let signModule = null;
-    for (const [id, mod] of Object.entries(cache)) {
-        try {
-            const exp = mod.exports;
-            if (exp && typeof exp.getSignFunction === 'function' &&
-                typeof exp.isWasmSignApi === 'function') {
-                signModule = exp;
-                break;
-            }
-        } catch(e) {}
-    }
-    if (!signModule) return { error: '未找到签名模块' };
-
-    const signFn = await signModule.getSignFunction('/web-client/v2/public/goodsPublic/page');
-    if (!signFn?.generateSign) return { error: '无 generateSign' };
-
-    const timestamp = Date.now();
-    const random = Math.floor(100000 + Math.random() * 900000);
-    const sign = signFn.generateSign(bodyStr, 'POST', String(timestamp), String(random));
-
-    // 用页面 fetch (被 2.js hook, 会自动添加 decode__1174 URL 参数)
-    const resp = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-            'accept': 'application/json, text/plain, */*',
-            'content-type': 'application/json',
-            'deviceid': deviceid,
-            'globalid': globalid,
-            'pzos': 'windows',
-            'pzplatform': 'pc',
-            'pztimestamp': String(timestamp),
-            'pzversion': '26.710.1916',
-            'pzversioncode': '1',
-            'random': String(random),
-            'sign': sign,
-            'skey': 'CLIENT',
-            'x-sign-version': signFn.version || 'v17',
-        },
-        body: bodyStr,
-        credentials: 'include',
-    });
-
-    const text = await resp.text();
-    return { status: resp.status, body: text };
-}
-"""
-
 
 class PzdsApiClient:
-    """盼之 API 客户端: Playwright + webpack 拦截 + WASM 签名
+    """盼之 API 客户端: Playwright + 响应监听 + 滚动翻页
 
-    启动浏览器加载商品列表页，通过 webpack 拦截窃取签名模块，
-    每次请求生成 WASM 签名并用页面 fetch 发送（2.js 自动添加 decode__1174）。
+    启动浏览器加载商品列表页，通过 WAF 验证后，
+    监听 goodsPublic/page 响应获取数据，滚动触发翻页。
     """
 
     def __init__(
@@ -141,15 +45,16 @@ class PzdsApiClient:
         self._browser = None
         self._context = None
         self._page = None
-        self._deviceid = ""
-        self._globalid = ""
+        # 响应监听: 最新一次 goodsPublic/page 的 JSON 响应
+        self._last_json_response: dict | None = None
+        self._response_event = asyncio.Event()
 
     @property
     def page_url(self) -> str:
         return f"{BASE_URL}/goodsList/{self._game_id}/{self._catalogue}"
 
     async def start(self):
-        """启动浏览器，建立 webpack 签名环境"""
+        """启动浏览器，通过 WAF 验证，建立响应监听"""
         try:
             from patchright.async_api import async_playwright
         except ImportError:
@@ -175,48 +80,43 @@ class PzdsApiClient:
                 "sec-ch-ua-platform": '"Windows"',
             },
         )
-
-        # 注入 webpack 拦截脚本（在每个页面加载前执行）
-        await self._context.add_init_script(WEBPACK_INJECT)
         self._page = await self._context.new_page()
 
-        # 拦截页面真实请求，提取 deviceid/globalid
-        real_headers: dict[str, str] = {}
+        # 监听 goodsPublic/page 响应
+        async def on_response(response):
+            if "goodsPublic/page" in response.url:
+                try:
+                    body = await response.text()
+                    if body.strip().startswith("{"):
+                        data = json.loads(body)
+                        if "data" in data and "records" in data.get("data", {}):
+                            self._last_json_response = data
+                            self._response_event.set()
+                except Exception:
+                    pass
 
-        def on_request(request):
-            if "goodsPublic/page" in request.url and not real_headers:
-                real_headers.update(dict(request.headers))
+        self._page.on("response", on_response)
 
-        self._page.on("request", on_request)
-
+        # 首次加载触发 WAF JS 挑战
         logger.info("正在加载 %s ...", self.page_url)
-        await self._page.goto(self.page_url, wait_until="networkidle", timeout=60000)
+        try:
+            await self._page.goto(self.page_url, wait_until="networkidle", timeout=60000)
+        except Exception:
+            pass  # WAF 可能导致超时，忽略
         await self._page.wait_for_timeout(2000)
 
-        self._deviceid = real_headers.get("deviceid", "")
-        self._globalid = real_headers.get("globalid", "")
+        # 刷新通过 WAF 验证（首次返回 WAF 挑战页，刷新后正常）
+        logger.info("刷新页面通过 WAF 验证...")
+        await self._page.reload(wait_until="networkidle", timeout=60000)
+        await self._page.wait_for_timeout(2000)
 
-        if not self._deviceid:
-            # fallback: 从 localStorage 获取
-            self._deviceid = await self._page.evaluate("""
-            () => {
-                for (let i = 0; i < localStorage.length; i++) {
-                    const k = localStorage.key(i);
-                    if (k.toLowerCase().includes('device')) return localStorage.getItem(k);
-                }
-                return '';
-            }
-            """)
+        # 等待首个 JSON 响应
+        try:
+            await asyncio.wait_for(self._response_event.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            raise RuntimeError("WAF 验证失败，未捕获到 JSON 响应")
 
-        # 验证 webpack 拦截是否成功
-        has_require = await self._page.evaluate("() => !!window.__webpack_require__")
-        if not has_require:
-            raise RuntimeError("webpack 拦截失败，无法获取签名函数")
-
-        logger.info(
-            "签名环境就绪: deviceid=%s, globalid=%s",
-            self._deviceid[:12], self._globalid[:12],
-        )
+        logger.info("WAF 通过，响应监听就绪")
 
     @property
     def is_alive(self) -> bool:
@@ -250,11 +150,14 @@ class PzdsApiClient:
         page: int = 1,
         page_size: int = 20,
     ) -> dict[str, Any]:
-        """调用商品列表 API
+        """获取指定页的商品列表
+
+        通过滚动触发页面自身的分页加载，监听响应获取 JSON 数据。
+        页面首次加载已是第 1 页，page>1 时滚动到底部触发后续页。
 
         Args:
-            page: 页码
-            page_size: 每页数量
+            page: 页码（1-based）
+            page_size: 每页数量（页面固定为 10，此参数仅用于校验）
 
         Returns:
             API JSON 响应（含 data.records 列表）
@@ -262,52 +165,39 @@ class PzdsApiClient:
         if not self._page:
             raise RuntimeError("客户端未启动，请先调用 start()")
 
-        body = {
-            "order": "ASC",
-            "sort": None,
-            "page": page,
-            "pageSize": page_size,
-            "action": {
-                "gameId": self._game_id,
-                "merchantMark": None,
-                "keywords": [],
-                "searchWords": [],
-                "searchPropertyIds": [],
-                "recommendSearchConfigIds": [],
-                "unionGameIds": [],
-                "goodsSearchActions": [],
-                "metas": {"single1": []},
-                "goodsCatalogueId": self._catalogue,
-                "goodsSubCatalogueIds": [],
-                "countFlag": False,
-                "conditionSearch": False,
-            },
-        }
-        # 紧凑格式（与 JS JSON.stringify 一致）
-        body_str = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        if page == 1:
+            # 第 1 页在 start() 时已加载，直接返回缓存的响应
+            if self._last_json_response:
+                data = self._last_json_response
+                self._last_json_response = None
+                self._response_event.clear()
+                return data
+            # 缓存已清空，重新加载
+            await self._page.goto(self.page_url, wait_until="networkidle", timeout=60000)
+            await self._page.wait_for_timeout(2000)
+        else:
+            # 滚动到底部触发下一页加载
+            self._response_event.clear()
+            await self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
 
-        result = await self._page.evaluate(
-            SIGN_AND_FETCH_JS,
-            {
-                "apiUrl": GOODS_PAGE_API,
-                "bodyStr": body_str,
-                "deviceid": self._deviceid,
-                "globalid": self._globalid,
-            },
-        )
+        # 等待 JSON 响应
+        try:
+            await asyncio.wait_for(self._response_event.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            raise CrawlerError(f"等待第 {page} 页响应超时")
 
-        if result.get("error"):
-            raise CrawlerError(f"签名/请求失败: {result['error']}")
+        if not self._last_json_response:
+            raise CrawlerError(f"未捕获到第 {page} 页响应")
 
-        if result["status"] != 200:
-            logger.error("API 返回 %d: %s", result["status"], result["body"][:500])
-            raise CrawlerError(f"API 错误: HTTP {result['status']}")
+        data = self._last_json_response
+        self._last_json_response = None
+        self._response_event.clear()
 
-        data = json.loads(result["body"])
         records = data.get("data", {}).get("records", [])
+        current_page = data.get("data", {}).get("page", 0)
         logger.info(
-            "请求成功: page=%d, 返回 %d 条, total=%s",
-            page, len(records), data.get("data", {}).get("total"),
+            "请求成功: page=%d (期望) %d (实际), 返回 %d 条, total=%s",
+            page, current_page, len(records), data.get("data", {}).get("total"),
         )
         return data
 
@@ -333,14 +223,27 @@ class PzdsApiClient:
 
         url = f"{BASE_URL}/goodsDetails/{goods_no}/{self._catalogue}"
         logger.info("加载详情页: %s", url)
-        await self._page.goto(url, wait_until="networkidle", timeout=60000)
-        await self._page.wait_for_timeout(1500)
+        # domcontentloaded 足够: __NUXT__ script 在 DOM 解析阶段就注入
+        # networkidle 会因页面长连接/轮询永不触发，导致 60s 超时
+        await self._page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await self._page.wait_for_timeout(1000)
 
+        # __NUXT__ 在页面加载后被删除，但 script 标签内容保留
+        # 通过 eval script 文本重建 __NUXT__ 对象，提取 detailsData
         details = await self._page.evaluate("""() => {
             try {
-                const nuxt = window.__NUXT__;
-                if (!nuxt || !nuxt.data || !nuxt.data[0]) return null;
-                return nuxt.data[0].detailsData || null;
+                const scripts = Array.from(document.scripts);
+                for (const s of scripts) {
+                    const text = s.textContent;
+                    if (text && text.includes('__NUXT__') && text.length > 1000) {
+                        const fn = new Function(text + '; return window.__NUXT__;');
+                        const nuxt = fn();
+                        if (nuxt && nuxt.data && nuxt.data[0]) {
+                            return nuxt.data[0].detailsData || null;
+                        }
+                    }
+                }
+                return null;
             } catch(e) { return null; }
         }""")
 
@@ -467,38 +370,18 @@ def crawl(
 
 
 def _cleanup():
-    """进程退出时关闭所有浏览器"""
+    """清理所有缓存的浏览器实例"""
     global _loop
-    loop = _loop
-    if loop is None or loop.is_closed():
-        return
-    for client in _clients.values():
-        try:
-            loop.run_until_complete(client.close())
-        except Exception:
-            pass
-    _clients.clear()
-    try:
-        loop.close()
-    except Exception:
-        pass
+    if _loop and not _loop.is_closed():
+        for client in _clients.values():
+            try:
+                _loop.run_until_complete(client.close())
+            except Exception:
+                pass
+        _clients.clear()
+        _loop.close()
+        _loop = None
 
 
+import atexit
 atexit.register(_cleanup)
-
-
-def check_detail(product_id: str, platform: str = "6") -> bool:
-    """检查商品详情页，返回 True=在售, False=已售出
-
-    保留 SSR HTML 方式（httpx 直接请求详情页，检查"已出售"标记）。
-    """
-    with httpx.Client(timeout=15, trust_env=False, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-    }) as client:
-        try:
-            resp = client.get(f"{BASE_URL}/goodsDetails/{product_id}/{platform}")
-            return "已出售" not in resp.text
-        except Exception:
-            return True  # 异常时保留在售状态，下次再查
