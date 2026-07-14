@@ -27,8 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 async def run(game_id: str, start_page: int, max_pages: int,
-              page_size: int, platform: str) -> None:
-    """异步主函数: 先爬列表, 再处理详情 (同一 loop 内)"""
+              page_size: int, platform: str, detail_interval: float = 0.0,
+              proxy: str | None = None) -> None:
+    """异步主函数: 先爬列表, 再处理详情 (同一 loop 内)
+
+    Args:
+        detail_interval: 详情请求最小间隔（秒），避免触发 WAF 风控
+        proxy: 代理地址 (host:port)，None=不使用代理
+    """
     # ===== 阶段 1: 爬取所有列表页数据 =====
     all_accounts: list[dict] = []
     pages_done = 0
@@ -39,6 +45,7 @@ async def run(game_id: str, start_page: int, max_pages: int,
             accounts = await _crawl_async(
                 game_id, platform, max_pages=1,
                 page_size=page_size, start_page=current_page,
+                proxy=proxy, detail_interval=detail_interval,
             )
         except Exception as e:
             logger.error("page=%d 列表 API 失败: %s, 停止", current_page, e)
@@ -66,6 +73,7 @@ async def run(game_id: str, start_page: int, max_pages: int,
         if await process_account_async(
             acc["source"], acc["product_id"],
             acc["game_id"], acc["price"], platform=platform,
+            detail_interval=detail_interval, proxy=proxy,
         ):
             total_processed += 1
         if i % 10 == 0:
@@ -82,15 +90,19 @@ def main():
     parser.add_argument("--max-pages", type=int, required=True, help="最多翻页数")
     parser.add_argument("--page-size", type=int, default=10, help="每页条数 (默认 10)")
     parser.add_argument("--platform", default="6", help="商品分类ID (默认 6=成品号)")
+    parser.add_argument("--interval", type=float, default=1.5,
+                        help="详情请求间隔秒数 (默认 1.5, 避免触发 WAF 风控)")
+    parser.add_argument("--proxy", default=None,
+                        help="代理地址 host:port (如 47.111.179.99:19518, 避免本地 IP 被封)")
     args = parser.parse_args()
 
-    logger.info("开始: game=%s start_page=%d max_pages=%d page_size=%d platform=%s",
+    logger.info("开始: game=%s start_page=%d max_pages=%d page_size=%d platform=%s interval=%.1f proxy=%s",
                 args.game_id, args.start_page, args.max_pages,
-                args.page_size, args.platform)
+                args.page_size, args.platform, args.interval, args.proxy or "无")
 
     try:
         asyncio.run(run(args.game_id, args.start_page, args.max_pages,
-                        args.page_size, args.platform))
+                        args.page_size, args.platform, args.interval, args.proxy))
     finally:
         _cleanup()
 

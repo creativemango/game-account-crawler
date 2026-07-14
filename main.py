@@ -4,7 +4,6 @@ import logging
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 import yaml
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
@@ -38,6 +37,8 @@ def load_config(path: str = "config.yaml") -> dict:
 def run_crawl_loop(config: dict):
     interval = config["crawl"]["interval_seconds"]
     max_pages = config["crawl"].get("max_pages", 3)
+    detail_interval = config["crawl"].get("detail_interval_seconds", 0.0)
+    proxy = config["crawl"].get("proxy")
     while True:
         new_count = 0
         update_count = 0
@@ -59,7 +60,10 @@ def run_crawl_loop(config: dict):
             platform = config["sources"]["pzds"].get("platform", "6")
             for game_id in config["sources"]["pzds"]["games"]:
                 try:
-                    accounts = crawl_pzds(game_id, platform, max_pages=max_pages)
+                    accounts = crawl_pzds(
+                        game_id, platform, max_pages=max_pages,
+                        proxy=proxy, detail_interval=detail_interval,
+                    )
                     for a in accounts:
                         if upsert_account(**a):
                             new_count += 1
@@ -95,7 +99,8 @@ def run_detail_check_loop():
                 p = futures[f]
                 try:
                     is_active = f.result()
-                except Exception:
+                except Exception as e:
+                    logger.warning("[detail] %s/%s 检查异常: %s", p["source"], p["product_id"], e)
                     is_active = True  # 异常时保留原状态
 
                 if is_active:
@@ -114,8 +119,15 @@ VALUER_BATCH = 20      # 每轮处理条数
 TRAIN_INTERVAL = 86400  # 每日训练（秒）
 
 
-def _fetch_and_parse(source: str, product_id: str, game_id: str) -> tuple[dict, dict] | None:
-    """获取详情并解析为 (parsed_data, features)"""
+def _fetch_and_parse(source: str, product_id: str, game_id: str,
+                     detail_interval: float = 0.0,
+                     pzds_platform: str = "6") -> dict | None:
+    """获取详情并解析为 parsed_data dict
+
+    Args:
+        detail_interval: 详情请求最小间隔（秒），仅 pzds 生效
+        pzds_platform: 盼之商品分类ID（从 config 读取, 避免硬编码）
+    """
     try:
         if source == "pxb7":
             detail = fetch_pxb7_detail(product_id)
@@ -128,7 +140,8 @@ def _fetch_and_parse(source: str, product_id: str, game_id: str) -> tuple[dict, 
             from crawler.pzds import _get_client, _get_loop
             loop = _get_loop()
             client = asyncio.run_coroutine_threadsafe(
-                _get_client(game_id, "6"), loop
+                _get_client(game_id, pzds_platform,
+                            detail_interval=detail_interval), loop
             ).result(timeout=60)
             detail = asyncio.run_coroutine_threadsafe(
                 client.fetch_goods_detail(product_id), loop
@@ -142,8 +155,10 @@ def _fetch_and_parse(source: str, product_id: str, game_id: str) -> tuple[dict, 
         return None
 
 
-def run_valuer_loop():
+def run_valuer_loop(config: dict):
     """异步价值计算 worker：定期处理未估价的账号"""
+    detail_interval = config["crawl"].get("detail_interval_seconds", 0.0)
+    pzds_platform = config["sources"].get("pzds", {}).get("platform", "6")
     while True:
         try:
             pending = get_unvalued_accounts(limit=VALUER_BATCH)
@@ -153,7 +168,10 @@ def run_valuer_loop():
 
             computed = 0
             for acc in pending:
-                parsed = _fetch_and_parse(acc["source"], acc["product_id"], acc["game_id"])
+                parsed = _fetch_and_parse(
+                    acc["source"], acc["product_id"], acc["game_id"],
+                    detail_interval=detail_interval, pzds_platform=pzds_platform,
+                )
                 if not parsed:
                     continue
 
@@ -181,6 +199,9 @@ def run_valuer_loop():
                     value_ratio=ratio,
                 )
                 computed += 1
+                # pxb7 节流 (pzds 已在 client 内部节流)
+                if acc["source"] == "pxb7" and detail_interval > 0:
+                    time.sleep(detail_interval)
 
             logger.info("[valuer] computed=%d/%d", computed, len(pending))
         except Exception as e:
@@ -222,22 +243,27 @@ def run_train_loop():
 def start_background_tasks():
     init_db()
     config = load_config()
+    workers = config.get("workers", {})
 
-    crawl_thread = threading.Thread(target=run_crawl_loop, args=(config,), daemon=True)
-    crawl_thread.start()
-    print(f"Crawler started, interval={config['crawl']['interval_seconds']}s")
+    if workers.get("crawl", True):
+        crawl_thread = threading.Thread(target=run_crawl_loop, args=(config,), daemon=True)
+        crawl_thread.start()
+        print(f"Crawler started, interval={config['crawl']['interval_seconds']}s")
 
-    detail_thread = threading.Thread(target=run_detail_check_loop, daemon=True)
-    detail_thread.start()
-    print(f"Detail checker started, interval={DETAIL_CHECK_INTERVAL}s, workers={DETAIL_CHECK_WORKERS}")
+    if workers.get("detail_check", True):
+        detail_thread = threading.Thread(target=run_detail_check_loop, daemon=True)
+        detail_thread.start()
+        print(f"Detail checker started, interval={DETAIL_CHECK_INTERVAL}s, workers={DETAIL_CHECK_WORKERS}")
 
-    valuer_thread = threading.Thread(target=run_valuer_loop, daemon=True)
-    valuer_thread.start()
-    print(f"Valuer started, interval={VALUER_INTERVAL}s, batch={VALUER_BATCH}")
+    if workers.get("valuer", False):
+        valuer_thread = threading.Thread(target=run_valuer_loop, args=(config,), daemon=True)
+        valuer_thread.start()
+        print(f"Valuer started, interval={VALUER_INTERVAL}s, batch={VALUER_BATCH}")
 
-    train_thread = threading.Thread(target=run_train_loop, daemon=True)
-    train_thread.start()
-    print(f"Trainer started, interval={TRAIN_INTERVAL}s")
+    if workers.get("train", False):
+        train_thread = threading.Thread(target=run_train_loop, daemon=True)
+        train_thread.start()
+        print(f"Trainer started, interval={TRAIN_INTERVAL}s")
 
 
 @app.get("/")

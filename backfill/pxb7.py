@@ -12,6 +12,7 @@ run_valuer_loop 通过 get_unvalued_accounts 异步补全。
 """
 import argparse
 import logging
+import time
 
 from crawler.base import CrawlerError
 from crawler.pxb7 import crawl
@@ -30,12 +31,15 @@ def main():
     parser.add_argument("--start-page", type=int, required=True, help="起始页码")
     parser.add_argument("--max-pages", type=int, required=True, help="最多翻页数 (防失控)")
     parser.add_argument("--page-size", type=int, default=16, help="每页条数 (默认 16)")
+    parser.add_argument("--interval", type=float, default=0.5,
+                        help="详情请求间隔秒数 (默认 0.5, 避免触发风控)")
     args = parser.parse_args()
 
     game_id = args.game_id
     start_page = args.start_page
     max_pages = args.max_pages
     page_size = args.page_size
+    interval = args.interval
 
     total_fetched = 0
     total_processed = 0
@@ -72,6 +76,9 @@ def main():
                 processed += 1
             else:
                 failed += 1
+            # 节流: 避免高频请求触发风控
+            if interval > 0:
+                time.sleep(interval)
 
         total_fetched += fetched
         total_processed += processed

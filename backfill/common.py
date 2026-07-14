@@ -10,7 +10,6 @@ process_account / process_account_async 是两源共享的单条商品处理函�
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from crawler.pxb7 import fetch_detail as fetch_pxb7_detail
@@ -22,11 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 async def process_account_async(source: str, product_id: str, game_id: str,
-                                 price: float, platform: str = "6") -> bool:
+                                 price: float, platform: str = "6",
+                                 detail_interval: float = 0.0,
+                                 proxy: str | None = None) -> bool:
     """异步版: 获取详情→解析→提取特征→入 account_details (不计算价值)
 
     pzds 源在当前 event loop 内复用浏览器实例 (不跨 loop)。
     pxb7 源内部是同步 httpx 调用，此处直接执行。
+
+    Args:
+        detail_interval: 详情请求最小间隔（秒），仅 pzds 生效，0=不节流
+        proxy: 代理地址 (host:port)，仅 pzds 生效，None=不使用代理
 
     Returns:
         True=成功, False=详情获取/解析失败
@@ -46,7 +51,10 @@ async def process_account_async(source: str, product_id: str, game_id: str,
 
         elif source == "pzds":
             from crawler.pzds import _get_client
-            client = await _get_client(game_id, platform)
+            client = await _get_client(
+                game_id, platform,
+                detail_interval=detail_interval, proxy=proxy,
+            )
             detail = await client.fetch_goods_detail(product_id)
             parsed = parse_pzds(detail).to_dict()
 

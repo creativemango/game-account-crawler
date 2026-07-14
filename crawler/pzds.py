@@ -1,20 +1,24 @@
-"""pzds.com（盼之）爬虫 — Playwright + 响应监听 + 滚动翻页
+"""pzds.com（盼之）爬虫 — Playwright (列表) + httpx+quickjs (详情)
 
 替换原 webpack 拦截 + WASM 签名方案（盼之改版后 webpack 全局变量不再暴露）。
 
 原理:
   1. patchright 启动浏览器，打开 https://www.pzds.com/goodsList/{game_id}/{catalogue}
   2. 首次加载触发阿里云 WAF JS 挑战，刷新后通过验证
-  3. 监听 goodsPublic/page 响应，捕获 JSON 数据
+  3. 监听 goodsPublic/page 响应，捕获 JSON 数据 (列表页)
   4. 翻页: 滚动到底部触发下一页加载（页面自身签名逻辑工作）
-  5. 详情页: 从 __NUXT__.data[0].detailsData 提取 SSR 数据
+  5. 详情页: httpx 复用 WAF cookie 请求 HTML + quickjs 解析 __NUXT__ IIFE (不依赖 playwright)
 """
 import asyncio
+import atexit
 import json
 import logging
+import re
+import time
 from typing import Any
 
 import httpx
+import quickjs
 
 from .base import CrawlerError
 
@@ -23,6 +27,20 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.pzds.com"
 GOODS_PAGE_API = f"{API_BASE}/api/web-client/v2/public/goodsPublic/page"
 BASE_URL = "https://www.pzds.com"
+
+# httpx 请求头 (与 playwright context 一致，绕过 WAF 指纹检测)
+_HTTPX_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/150.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+}
 
 
 class PzdsApiClient:
@@ -37,6 +55,8 @@ class PzdsApiClient:
         headless: bool = True,
         game_id: str = "7",
         goods_catalogue_id: int = 6,
+        detail_interval: float = 0.0,
+        proxy: str | None = None,
     ):
         self._headless = headless
         self._game_id = game_id
@@ -48,6 +68,14 @@ class PzdsApiClient:
         # 响应监听: 最新一次 goodsPublic/page 的 JSON 响应
         self._last_json_response: dict | None = None
         self._response_event = asyncio.Event()
+        # httpx client (详情页用, 复用 playwright 的 WAF cookie)
+        self._httpx_client: httpx.AsyncClient | None = None
+        self._httpx_cookies: dict[str, str] = {}
+        # 详情请求节流: 两次请求间至少间隔 detail_interval 秒, 避免触发 WAF 频率限制
+        self._detail_interval = detail_interval
+        self._last_detail_time: float = 0.0
+        # 代理 (host:port 格式, 同时用于 playwright 和 httpx, 避免 IP 被封)
+        self._proxy = proxy
 
     @property
     def page_url(self) -> str:
@@ -62,24 +90,32 @@ class PzdsApiClient:
             logger.warning("patchright 未安装，回退到 playwright")
 
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=self._headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        launch_kwargs = {
+            "headless": self._headless,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        if self._proxy:
+            launch_kwargs["proxy"] = {"server": f"http://{self._proxy}"}
+            logger.info("使用代理: %s", self._proxy)
+        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
         # sec-ch-ua 伪装为正常 Chrome，绕过阿里云 WAF 的 HeadlessChrome 检测
-        self._context = await self._browser.new_context(
-            user_agent=(
+        context_kwargs = {
+            "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/150.0.0.0 Safari/537.36"
             ),
-            locale="zh-CN",
-            extra_http_headers={
+            "locale": "zh-CN",
+            "extra_http_headers": {
                 "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": '"Windows"',
             },
-        )
+        }
+        if self._proxy:
+            # 代理 TLS 隧道证书链不完整, 忽略 HTTPS 错误
+            context_kwargs["ignore_https_errors"] = True
+        self._context = await self._browser.new_context(**context_kwargs)
         self._page = await self._context.new_page()
 
         # 监听 goodsPublic/page 响应（放宽检查: 任何 JSON 响应都捕获）
@@ -101,8 +137,8 @@ class PzdsApiClient:
         logger.info("正在加载 %s ...", self.page_url)
         try:
             await self._page.goto(self.page_url, wait_until="networkidle", timeout=60000)
-        except Exception:
-            pass  # WAF 可能导致超时，忽略
+        except Exception as e:
+            logger.debug("首次加载异常 (WAF 挑战可能导致超时, 忽略): %s", e)
         await self._page.wait_for_timeout(2000)
 
         # 刷新通过 WAF 验证（首次返回 WAF 挑战页，刷新后正常）
@@ -118,6 +154,21 @@ class PzdsApiClient:
 
         logger.info("WAF 通过，响应监听就绪")
 
+        # 导出 cookies 给 httpx (详情页用, 不依赖 playwright 加载)
+        await self._refresh_cookies()
+        httpx_kwargs = {
+            "cookies": self._httpx_cookies,
+            "headers": {**_HTTPX_HEADERS, "Referer": self.page_url},
+            "timeout": 15,
+            "trust_env": False,
+            "follow_redirects": True,
+        }
+        if self._proxy:
+            # 代理 TLS 隧道可能证书链不完整, 跳过验证 (代理本身可信)
+            httpx_kwargs["proxy"] = f"http://{self._proxy}"
+            httpx_kwargs["verify"] = False
+        self._httpx_client = httpx.AsyncClient(**httpx_kwargs)
+
     @property
     def is_alive(self) -> bool:
         """浏览器与页面是否仍可用"""
@@ -128,7 +179,16 @@ class PzdsApiClient:
             and self._browser.is_connected()
         )
 
+    async def _refresh_cookies(self):
+        """从 playwright context 导出最新 cookies (WAF cookie 可能过期)"""
+        if self._context:
+            cookies = await self._context.cookies()
+            self._httpx_cookies = {c['name']: c['value'] for c in cookies}
+
     async def close(self):
+        if self._httpx_client:
+            await self._httpx_client.aclose()
+            self._httpx_client = None
         if self._browser:
             await self._browser.close()
         if self._playwright:
@@ -204,10 +264,16 @@ class PzdsApiClient:
         return data
 
     async def fetch_goods_detail(self, goods_no: str) -> dict[str, Any]:
-        """从详情页 SSR __NUXT__ 提取商品详情
+        """从详情页 SSR __NUXT__ 提取商品详情 (httpx+quickjs 优先, WAF 时降级 playwright)
 
-        盼之详情页是 Nuxt.js SSR 渲染，数据嵌在 window.__NUXT__.data[0].detailsData，
-        无需调用 API，页面加载后直接读取。
+        盼之详情页是 Nuxt.js SSR 渲染，数据嵌在 window.__NUXT__.data[0].detailsData。
+        __NUXT__ 是一个 IIFE: window.__NUXT__=(function(a,b,...){...})(实参...)，
+        执行后 window.__NUXT__ 会被删除，但 <script> 标签 textContent 保留原始文本。
+
+        策略:
+          1. httpx 拉 HTML + quickjs 解析 IIFE (0.3s/条, 10x 提速)
+          2. WAF 频率拦截时, 降级 playwright goto 过 WAF + 提取 + 刷新 cookie
+             (playwright 过 WAF 后, 后续 httpx 恢复可用)
 
         Args:
             goods_no: 商品编号（如 "MC17DN"）
@@ -220,18 +286,89 @@ class PzdsApiClient:
               - sellingPointLabels: 队伍+角色武器标签
               - subtitle: 绑定情况
         """
-        if not self._page:
+        if not self._httpx_client:
             raise RuntimeError("客户端未启动，请先调用 start()")
 
+        # 节流: 保证两次详情请求间隔 >= detail_interval, 避免触发 WAF 频率限制
+        if self._detail_interval > 0:
+            elapsed = time.monotonic() - self._last_detail_time
+            if elapsed < self._detail_interval:
+                await asyncio.sleep(self._detail_interval - elapsed)
+        self._last_detail_time = time.monotonic()
+
         url = f"{BASE_URL}/goodsDetails/{goods_no}/{self._catalogue}"
-        logger.info("加载详情页: %s", url)
-        # domcontentloaded 足够: __NUXT__ script 在 DOM 解析阶段就注入
-        # networkidle 会因页面长连接/轮询永不触发，导致 60s 超时
+
+        # 优先: httpx + quickjs
+        try:
+            return await self._fetch_detail_httpx(goods_no, url)
+        except CrawlerError as e:
+            # WAF 拦截/无 __NUXT__: 降级 playwright (过 WAF + 提取 + 刷 cookie)
+            logger.warning("httpx 失败, 降级 playwright: %s (%s)", goods_no, e)
+            if not self._page or self._page.is_closed():
+                raise CrawlerError(f"playwright 不可用, 无法降级: {goods_no}")
+            details = await self._fetch_detail_playwright(goods_no, url)
+            # playwright 过 WAF 后刷新 cookie, 后续 httpx 恢复可用
+            await self._refresh_cookies()
+            self._httpx_client.cookies.update(self._httpx_cookies)
+            return details
+
+    async def _fetch_detail_httpx(self, goods_no: str, url: str) -> dict[str, Any]:
+        """httpx 请求 + quickjs 解析 __NUXT__ (WAF 拦截时抛 CrawlerError 触发降级)"""
+        resp = await self._httpx_client.get(url)
+        html = resp.text
+
+        # WAF 挑战页特征: 含 aliyun_waf 或无 __NUXT__ 且内容短
+        if "aliyun_waf" in html or ("__NUXT__" not in html and len(html) < 5000):
+            raise CrawlerError(f"WAF 拦截: {goods_no}")
+
+        # 正则提取所有 <script> 内容，找含 __NUXT__ 的（通常很长）
+        scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
+        nuxt_script = next(
+            (s for s in scripts if '__NUXT__' in s and len(s) > 1000), None
+        )
+        if not nuxt_script:
+            raise CrawlerError(f"无 __NUXT__ 脚本: {goods_no}")
+
+        # quickjs 沙箱执行 IIFE: 声明空 window → 执行脚本 → 取 detailsData (8ms)
+        ctx = quickjs.Context()
+        js = (
+            "var window={};"
+            + nuxt_script
+            + ";JSON.stringify(window.__NUXT__.data[0].detailsData)"
+        )
+        try:
+            result = ctx.eval(js)
+        except Exception as e:
+            raise CrawlerError(f"解析 __NUXT__ 失败 {goods_no}: {e}")
+
+        if not result or result == "null":
+            raise CrawlerError(f"detailsData 为空: {goods_no}")
+
+        details = json.loads(result)
+        logger.info("详情获取成功(httpx): %s, price=%s", goods_no, details.get("price"))
+        return details
+
+    async def _fetch_detail_playwright(self, goods_no: str, url: str) -> dict[str, Any]:
+        """playwright goto 详情页 + page.evaluate 提取 (WAF 降级路径)
+
+        真实浏览器能执行 WAF JS 挑战，goto 后若检测到 WAF 挑战页则 reload 通过。
+        reload 后等待 3s 让 WAF JS 执行完毕, 再尝试提取 __NUXT__。
+        """
+        logger.info("加载详情页(playwright): %s", url)
         await self._page.goto(url, wait_until="domcontentloaded", timeout=15000)
         await self._page.wait_for_timeout(1000)
 
-        # __NUXT__ 在页面加载后被删除，但 script 标签内容保留
-        # 通过 eval script 文本重建 __NUXT__ 对象，提取 detailsData
+        # 检测 WAF 挑战页 (含 aliyun_waf), reload 让浏览器执行 JS 通过验证
+        is_waf = await self._page.evaluate(
+            "() => document.body && document.body.innerHTML.includes('aliyun_waf')"
+        )
+        if is_waf:
+            logger.info("playwright 遇到 WAF 挑战, reload 通过: %s", goods_no)
+            await self._page.reload(wait_until="domcontentloaded", timeout=15000)
+            # 等待 3s 让 WAF JS 挑战执行完毕设置 cookie
+            await self._page.wait_for_timeout(3000)
+
+        # __NUXT__ 加载后被删除, 通过 eval script 文本重建
         details = await self._page.evaluate("""() => {
             try {
                 const scripts = Array.from(document.scripts);
@@ -250,9 +387,9 @@ class PzdsApiClient:
         }""")
 
         if not details:
-            raise CrawlerError(f"未提取到详情数据: {goods_no}")
+            raise CrawlerError(f"playwright 也未提取到详情: {goods_no}")
 
-        logger.info("详情获取成功: %s, price=%s", goods_no, details.get("price"))
+        logger.info("详情获取成功(playwright): %s, price=%s", goods_no, details.get("price"))
         return details
 
 
@@ -270,11 +407,20 @@ def _get_loop() -> asyncio.AbstractEventLoop:
     return _loop
 
 
-async def _get_client(game_id: str, platform: str) -> PzdsApiClient:
-    """获取或创建复用的 client（跨 crawl 调用复用浏览器）"""
+async def _get_client(
+    game_id: str, platform: str, detail_interval: float = 0.0,
+    proxy: str | None = None,
+) -> PzdsApiClient:
+    """获取或创建复用的 client（跨 crawl 调用复用浏览器）
+
+    Args:
+        detail_interval: 详情请求最小间隔（秒），0=不节流；复用时也会更新此值
+        proxy: 代理地址 (host:port)，None=不使用代理
+    """
     key = f"{game_id}:{platform}"
     client = _clients.get(key)
     if client is not None and client.is_alive:
+        client._detail_interval = detail_interval  # 复用时更新节流配置
         return client
 
     # 已失效或不存在，清理后重建
@@ -289,6 +435,8 @@ async def _get_client(game_id: str, platform: str) -> PzdsApiClient:
         headless=True,
         game_id=game_id,
         goods_catalogue_id=int(platform),
+        detail_interval=detail_interval,
+        proxy=proxy,
     )
     await client.start()
     _clients[key] = client
@@ -301,15 +449,21 @@ async def _crawl_async(
     max_pages: int,
     page_size: int,
     start_page: int = 1,
+    proxy: str | None = None,
+    detail_interval: float = 0.0,
 ) -> list[dict]:
     """异步爬取商品列表，翻页直到无数据或达到 max_pages
 
     Args:
         start_page: 起始页码（默认 1，回填场景可从第 N 页开始）
+        proxy: 代理地址 (host:port)，None=不使用代理
+        detail_interval: 详情请求最小间隔（秒），0=不节流
     """
     results: list[dict] = []
     try:
-        client = await _get_client(game_id, platform)
+        client = await _get_client(
+            game_id, platform, detail_interval=detail_interval, proxy=proxy,
+        )
     except Exception as e:
         raise CrawlerError(f"浏览器启动失败: {e}")
 
@@ -352,6 +506,8 @@ def crawl(
     max_pages: int = 1,
     page_size: int = 10,
     start_page: int = 1,
+    proxy: str | None = None,
+    detail_interval: float = 0.0,
 ) -> list[dict]:
     """爬取商品列表（同步接口，供 main.py 线程调用）
 
@@ -361,13 +517,17 @@ def crawl(
         max_pages: 最多翻页数
         page_size: 每页数量
         start_page: 起始页码（默认 1，回填场景可从第 N 页开始）
+        proxy: 代理地址 (host:port)，None=不使用代理
+        detail_interval: 详情请求最小间隔（秒），0=不节流
 
     Returns:
         标准化 dict 列表: [{source, game_id, product_id, title, price, raw_data}, ...]
     """
     loop = _get_loop()
     return loop.run_until_complete(
-        _crawl_async(game_id, platform, max_pages, page_size, start_page=start_page)
+        _crawl_async(game_id, platform, max_pages, page_size,
+                     start_page=start_page, proxy=proxy,
+                     detail_interval=detail_interval)
     )
 
 
@@ -385,5 +545,51 @@ def _cleanup():
         _loop = None
 
 
-import atexit
 atexit.register(_cleanup)
+
+
+def check_detail(product_id: str, platform: str = "6") -> bool:
+    """检查盼之商品是否在售 (同步接口, 供 main.py ThreadPoolExecutor 调用)
+
+    用 httpx 请求详情页 SSR, 能提取到 __NUXT__.detailsData 则视为在售。
+    异常/WAF/无数据时返回 True (保留在售状态, 下次再查, 与 pxb7 行为一致)。
+
+    Args:
+        product_id: 商品编号 (goodsNo)
+        platform: 商品分类ID (默认 "6")
+    """
+    url = f"{BASE_URL}/goodsDetails/{product_id}/{platform}"
+    try:
+        with httpx.Client(
+            timeout=15, trust_env=False, headers=_HTTPX_HEADERS, follow_redirects=True,
+        ) as client:
+            resp = client.get(url)
+            html = resp.text
+
+        # WAF 挑战页或无 __NUXT__ → 可能已下架或被拦截, 保守视为在售
+        if "aliyun_waf" in html or "__NUXT__" not in html:
+            return True
+
+        # 提取 __NUXT__ 脚本
+        scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
+        nuxt_script = next(
+            (s for s in scripts if '__NUXT__' in s and len(s) > 1000), None
+        )
+        if not nuxt_script:
+            return True
+
+        # quickjs 解析 detailsData, 能解析到非空数据则在售
+        ctx = quickjs.Context()
+        js = (
+            "var window={};"
+            + nuxt_script
+            + ";JSON.stringify(window.__NUXT__.data[0].detailsData)"
+        )
+        result = ctx.eval(js)
+        if not result or result == "null":
+            return False  # detailsData 为空 → 已售出/下架
+
+        return True
+
+    except Exception:
+        return True  # 异常时保留在售状态
