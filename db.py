@@ -187,11 +187,14 @@ def search_accounts(source: str = None, game_id: str = None,
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-    # 排序
+    # 排序 (始终 join account_details 以返回价值字段)
+    join_detail = "LEFT JOIN account_details d ON a.id = d.account_id"
     order_by = "a.created_at DESC"
-    join_detail = ""
-    if sort in ("value_ratio_desc", "value_desc", "score_desc"):
-        join_detail = "LEFT JOIN account_details d ON a.id = d.account_id"
+    if sort == "price_asc":
+        order_by = "a.price ASC"
+    elif sort == "price_desc":
+        order_by = "a.price DESC"
+    elif sort in ("value_ratio_desc", "value_desc", "score_desc"):
         # SQLite 不支持 NULLS LAST，用 CASE 模拟（非 NULL 排前面）
         if sort == "value_ratio_desc":
             order_by = "CASE WHEN d.value_ratio IS NULL THEN 1 ELSE 0 END, d.value_ratio DESC"
