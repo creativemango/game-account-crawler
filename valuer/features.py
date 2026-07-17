@@ -22,6 +22,21 @@ HOT_CHARS_WUWA = {
     "嘉贝莉娜", "鉴心", "凌阳",
 }
 
+# 原神热门角色 (市场上高需求, 价值溢价)
+HOT_CHARS_GENSHIN = {
+    "芙宁娜", "那维莱特", "夜兰", "纳西妲", "雷电将军", "钟离",
+    "枫原万叶", "阿蕾奇诺", "克洛琳德", "千织", "娜维娅",
+    "闲云", "艾尔海森", "流浪者", "神里绫华", "胡桃", "甘雨",
+    "八重神子", "珊瑚宫心海", "申鹤", "妮露", "赛诺",
+    "白术", "林尼", "莱欧斯利", "希格雯", "调香师",
+}
+
+# 游戏 ID 到热门角色集的映射
+GAME_HOT_CHARS = {
+    "10302": HOT_CHARS_WUWA,
+    "10026": HOT_CHARS_GENSHIN,
+}
+
 # 特征名 (不含 price/log_price, 这两个是训练标签)
 FEATURE_NAMES: list[str] = [
     # 基础数值 (7)
@@ -55,10 +70,12 @@ def extract_features(
         parsed: ParsedAccount.to_dict() 的结果, 或 ParsedAccount 对象
         source: 数据来源 ("pxb7")
         price: 实际价格 (训练时用作标签)
+        game_id: 游戏 ID (如 "10302"=鸣潮, "10026"=原神)
 
     Returns:
         特征 dict, 包含 FEATURE_NAMES 中的所有特征 + price + log_price
     """
+    hot_chars = GAME_HOT_CHARS.get(game_id, HOT_CHARS_WUWA)
     # 接受 ParsedAccount 对象或 dict
     if hasattr(parsed, "to_dict"):
         d = parsed.to_dict()
