@@ -5,7 +5,7 @@
   角色命座分布 (8): c0~c6 数量 + four_star_full_const 数量
   武器精炼分布 (6): r1~r5 数量 + high_refine_count (精3+)
   稀有度指标 (4): team_count, hot_char_count, skin_count, five_star_char_count
-  来源 (1): source_pzds (0=螃蟹, 1=盼之)
+  来源 (1): source_pzds (当前仅为螃蟹, 保留用于多源扩展)
   价格 (1): price (训练用标签)
   对数价格 (1): log_price (训练用标签, 长尾分布稳定训练)
 """
@@ -47,12 +47,13 @@ def extract_features(
     parsed: dict | Any,
     source: str = "",
     price: float = 0.0,
+    game_id: str = "",
 ) -> dict[str, float]:
     """从 ParsedAccount.dict 或 dict 提取特征
 
     Args:
         parsed: ParsedAccount.to_dict() 的结果, 或 ParsedAccount 对象
-        source: 数据来源 ("pxb7" / "pzds")
+        source: 数据来源 ("pxb7")
         price: 实际价格 (训练时用作标签)
 
     Returns:
@@ -84,7 +85,7 @@ def extract_features(
         name = c.get("name", "")
         if const <= 6:
             c_counts[const] += 1
-        if name in HOT_CHARS_WUWA:
+        if name in hot_chars:
             hot_count += 1
 
     four_star_full = sum(
@@ -138,7 +139,7 @@ def extract_features(
         "hot_char_count": float(hot_count),
         "skin_count": float(len(skins)),
         "five_star_char_count": float(len(five_star_chars)),
-        "source_pzds": 1.0 if source == "pzds" else 0.0,
+        "source_pzds": 0.0,
     }
 
     # 训练标签 (预测时不需要)
@@ -152,3 +153,7 @@ def extract_features(
 def features_to_vector(features: dict) -> list[float]:
     """特征 dict → 固定顺序的特征向量 (只含 FEATURE_NAMES)"""
     return [float(features.get(name, 0.0)) for name in FEATURE_NAMES]
+
+
+
+

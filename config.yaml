@@ -4,17 +4,12 @@ sources:
     name: "螃蟹"
     games:
       - "10302"    # 鸣潮
-  pzds:
-    enabled: true
-    name: "盼之"
-    games:
-      - "303"      # 鸣潮
-    platform: "6"
-
+      - "10026"    # 原神
 game_names:
   "鸣潮":
     pxb7: "10302"
-    pzds: "303"
+  "原神":
+    pxb7: "10026"
 
 crawl:
   interval_seconds: 300  # 爬取间隔（秒）
@@ -32,3 +27,6 @@ workers:
 api:
   host: "0.0.0.0"
   port: 8000
+
+
+

@@ -2,7 +2,7 @@
 
 ## 概述
 
-爬取 pxb7.com（螃蟹）和 pzds.com（盼之）的游戏账号列表，用户配置目标游戏 ID，定时轮询最新上架账号，提供 API 查询。
+爬取 pxb7.com（螃蟹）和 [已移除].com（螃蟹）的游戏账号列表，用户配置目标游戏 ID，定时轮询最新上架账号，提供 API 查询。
 
 ## 架构
 
@@ -13,10 +13,10 @@ config.yaml      →  爬虫引擎  →  SQLite  →  FastAPI
 
 ## 两个网站的 API
 
-### pzds.com
+### [已移除].com
 
 ```
-GET https://www.pzds.com/api/goodsList?gameId={gameId}&platform={platform}
+GET https://www.[已移除].com/api/goodsList?gameId={gameId}&platform={platform}
 ```
 
 - platform: 6（账号）、其他值待确认
@@ -53,7 +53,7 @@ SQLite 单表：
 ```sql
 CREATE TABLE accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT NOT NULL,              -- 'pxb7' | 'pzds'
+    source TEXT NOT NULL,              -- 'pxb7' | '[已移除]'
     game_id TEXT NOT NULL,             -- 平台原始游戏 ID
     product_id TEXT NOT NULL,          -- 商品唯一标识
     title TEXT,                        -- 标题（生成列）
@@ -79,7 +79,7 @@ Scrapling `Fetcher` 发 HTTP 请求。两个网站各一个函数：
 
 ```python
 def crawl_pxb7(game_id: str) -> list[dict]
-def crawl_pzds(game_id: str) -> list[dict]
+def crawl_[已移除](game_id: str) -> list[dict]
 ```
 
 - 翻页直至无新数据或到达上限
@@ -116,7 +116,7 @@ sources:
     enabled: true
     games:
       - "10302"  # 鸣潮
-  pzds:
+  [已移除]:
     enabled: true
     games:
       - "303"    # 鸣潮
@@ -139,7 +139,7 @@ game-account-crawler/
 ├── crawler/
 │   ├── __init__.py
 │   ├── pxb7.py
-│   ├── pzds.py
+│   ├── [已移除].py
 │   └── base.py
 ├── db.py
 ├── api.py
@@ -152,3 +152,4 @@ game-account-crawler/
 - scrapling[fetchers]
 - fastapi + uvicorn
 - pyyaml
+

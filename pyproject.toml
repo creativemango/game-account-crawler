@@ -10,7 +10,6 @@ dependencies = [
     "numpy",
     "patchright",
     "lightgbm>=4.6.0",
-    "quickjs>=1.19.4",
 ]
 
 [dependency-groups]

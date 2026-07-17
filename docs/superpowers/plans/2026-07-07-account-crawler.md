@@ -1,8 +1,8 @@
-# 账号交易平台爬虫 — 实现计划
+﻿# 账号交易平台爬虫 — 实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans.
 
-**Goal:** 实现 pxb7.com 和 pzds.com 账号爬虫，定时轮询 + SQLite 存储 + FastAPI 查询
+**Goal:** 实现 pxb7.com 和 [已移除].com 账号爬虫，定时轮询 + SQLite 存储 + FastAPI 查询
 
 **Architecture:** Scrapling Fetcher 发 HTTP → 解析 JSON → SQLite 去重存储 → FastAPI 暴露查询接口。`while True + sleep` 调度。
 
@@ -24,9 +24,9 @@
 
 创建表、插入/更新、查询方法。
 
-### Task 3: pzds.com 爬虫
+### Task 3: [已移除].com 爬虫
 
-**Files:** `crawler/pzds.py`, `crawler/base.py`
+**Files:** `crawler/[已移除].py`, `crawler/base.py`
 
 GET API → 解析 products[] → 返回 dict 列表。
 
@@ -51,3 +51,4 @@ POST API → 解析 data.list[] → 返回 dict 列表。
 ### Task 7: 验证
 
 启动 api.py → curl 测试接口 → 确认数据入库。
+

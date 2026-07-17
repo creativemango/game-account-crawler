@@ -14,7 +14,7 @@ tailwind.config = {
       colors: {
         bg: '#0F172A', card: '#1E293B', muted: '#334155',
         fg: '#E2E8F0', accent: '#D97706',
-        pxb7: '#7C3AED', pzds: '#3B82F6',
+        pxb7: '#7C3AED',
       }
     }
   }
@@ -208,7 +208,7 @@ createApp({
       try {
         const d = typeof item.raw_data === 'string' ? JSON.parse(item.raw_data) : item.raw_data
         if (item.source === 'pxb7') return `https://www.pxb7.com/product/${d.productId || item.product_id}/1`
-        if (item.source === 'pzds') return `https://www.pzds.com${d.url || '/goodsDetails/' + item.product_id + '/6'}`
+        
       } catch {}
       return '#'
     }
@@ -257,3 +257,4 @@ createApp({
 </script>
 </body>
 </html>
+

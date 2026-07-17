@@ -1,10 +1,10 @@
 """鸣潮账号数据结构化解析
 
-统一解析螃蟹/盼之的原始商品数据，输出标准化的账号资产信息。
+统一解析螃蟹的商品数据，输出标准化的账号资产信息。
 
 数据来源:
   - 螃蟹: detailPost 接口的 productAttrs + reportTitleAttr + productName
-  - 盼之: 详情页 __NUXT__.detailsData 的 metadataModel.resources + section* + sellingPointLabels
+
 
 统一输出 ParsedAccount:
   yellow/level/star_sounds/fuujin_waves/zhuchao_waves/yubo_coral/total_pulls
@@ -56,7 +56,7 @@ class ParsedAccount:
     four_star_chars: list[Character] = field(default_factory=list)
     five_star_weapons: list[Weapon] = field(default_factory=list)
     # 其他
-    teams: list[str] = field(default_factory=list)   # 队伍（盼之独有）
+    teams: list[str] = field(default_factory=list)   # 队伍
     skins: list[str] = field(default_factory=list)    # 服饰
 
     @property
@@ -173,119 +173,3 @@ def parse_pxb7(detail: dict) -> ParsedAccount:
     return pa
 
 
-# ===== 盼之解析 =====
-
-def _parse_corner_mark(mark: str | None) -> tuple[int, int | None]:
-    """解析盼之 resources 的 cornerMark
-
-    格式:
-      "6+1" → (命座=6, 精炼=1)
-      "6"   → (命座=6, 精炼=None)
-      "1"   → 武器精炼=1（code 以 MC1 开头时）
-
-    Returns:
-        (constellation, weapon_refine)
-    """
-    if not mark:
-        return (0, None)
-    if "+" in mark:
-        parts = mark.split("+")
-        try:
-            c = int(parts[0])
-            r = int(parts[1]) if len(parts) > 1 else None
-            return (c, r)
-        except ValueError:
-            return (0, None)
-    try:
-        return (int(mark), None)
-    except ValueError:
-        return (0, None)
-
-
-def _is_weapon_code(code: str) -> bool:
-    """武器 code 以 MC1 开头（MC100xx / MC101xx）"""
-    return code.startswith("MC1") if code else False
-
-
-def _is_skin_code(code: str) -> bool:
-    """服饰 code 以 MC2 开头（MC200xx）"""
-    return code.startswith("MC2") if code else False
-
-
-def _parse_pzds_team(label: str) -> str | None:
-    """从 sellingPointLabels 中识别队伍名
-
-    队伍标签特征: 以"队"结尾（如 "绯琳莫队"、"爱弥斯震谐队"）
-    非 "X+Y" 格式且非 "X命XXX" 格式
-    """
-    label = label.strip()
-    if not label:
-        return None
-    # 排除 "X+Y" 格式（角色武器绑定）
-    if re.match(r"^[\u4e00-\u9fa5・]+\d+\+\d+$", label):
-        return None
-    # 排除 "X命XXX" / "满命XXX" 格式
-    if re.match(r"^(\d+命|满命)", label):
-        return None
-    # 排除 "满命角色xN"
-    if "满命角色" in label:
-        return None
-    # 以"队"结尾的是队伍
-    if label.endswith("队"):
-        return label
-    return None
-
-
-def parse_pzds(detail: dict) -> ParsedAccount:
-    """解析盼之详情页 __NUXT__.detailsData
-
-    Args:
-        detail: fetch_goods_detail() 返回的 detailsData dict
-
-    Returns:
-        ParsedAccount
-    """
-    pa = ParsedAccount()
-
-    # 1. section* → 数值
-    # section1=黄数, section2=联觉等级, section3=星声, section4=浮金波纹, section5=金角色数
-    pa.yellow = int(detail.get("section1") or 0)
-    pa.level = int(detail.get("section2") or 0)
-    pa.star_sounds = int(detail.get("section3") or 0)
-    pa.fuujin_waves = int(detail.get("section4") or 0)
-    # section5 是金角色数，不直接用（从 resources 统计）
-
-    # 2. metadataModel.resources → 角色/武器/服饰
-    meta = detail.get("metadataModel", {}) or {}
-    resources = meta.get("resources", []) or []
-
-    for r in resources:
-        name = r.get("name", "")
-        code = r.get("code", "")
-        mark = r.get("cornerMark")
-
-        if not name:
-            continue
-
-        if _is_skin_code(code):
-            # 服饰
-            pa.skins.append(name)
-        elif _is_weapon_code(code):
-            # 武器（无角色绑定的独立武器）
-            refine, _ = _parse_corner_mark(mark)
-            pa.five_star_weapons.append(Weapon(name=name, refine=refine))
-        else:
-            # 角色
-            constellation, weapon_refine = _parse_corner_mark(mark)
-            pa.five_star_chars.append(
-                Character(name=name, constellation=constellation,
-                          weapon_refine=weapon_refine)
-            )
-
-    # 3. sellingPointLabels → 队伍
-    for label in detail.get("sellingPointLabels", []) or []:
-        team = _parse_pzds_team(label)
-        if team:
-            pa.teams.append(team)
-
-    return pa
