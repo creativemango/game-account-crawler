@@ -51,6 +51,7 @@ class ParsedAccount:
     fuujin_waves: int = 0         # 浮金波纹
     zhuchao_waves: int = 0        # 铸潮波纹
     yubo_coral: int = 0           # 余波珊瑚
+    artifact_count: int = 0       # 圣遗物数量（原神，标题提取）
     # 角色/武器
     five_star_chars: list[Character] = field(default_factory=list)
     four_star_chars: list[Character] = field(default_factory=list)

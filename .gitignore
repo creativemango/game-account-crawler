@@ -34,6 +34,7 @@ env/
 *.db-journal
 *.db-wal
 *.db-shm
+*.db.bak
 
 # IDE
 .vscode/

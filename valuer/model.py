@@ -49,6 +49,41 @@ EARLY_STOPPING_ROUNDS = 50
 VAL_RATIO = 0.2
 RANDOM_SEED = 42
 
+# 训练价格封顶（winsorize）：剔除明显虚高/异常标价对模型的影响。
+# 保留中高端样本的区分度，仅压掉极端尾部（如 9 万、90 万这类异常标价）。
+TRAIN_PRICE_CAP = 25000.0
+
+# 用户市场校准锚点：(模型原始 P50 -> 校准价值)
+# 基于用户提供的三个行情锚点拟合的分段线性映射：
+#   锚点1: 6 个值钱满命 + 大量杂角色 -> 6000-6500
+#   锚点3: 哥伦比娅/玛薇卡/基尼奇/菲林斯等满命 -> 7000-8000
+#   锚点2: 尼可/奈芙尔/玛薇卡/丝柯克等 8 个满命 -> 10000-11000
+# 低价位（<=500）保持原样；超出最后锚点外推后封顶。
+CALIBRATION_KNOTS = [
+    (500.0, 500.0),
+    (10883.0, 6250.0),
+    (14274.0, 7500.0),
+    (16087.0, 10500.0),
+]
+MAX_CALIBRATED_VALUE = 13000.0
+
+
+def calibrate_value(raw: float) -> float:
+    """把模型原始 P50 映射为用户市场校准后的价值"""
+    if raw <= CALIBRATION_KNOTS[0][0]:
+        return max(raw, 0.0)
+    prev_x, prev_y = CALIBRATION_KNOTS[0]
+    for x, y in CALIBRATION_KNOTS[1:]:
+        if raw <= x:
+            t = (raw - prev_x) / (x - prev_x)
+            return prev_y + t * (y - prev_y)
+        prev_x, prev_y = x, y
+    # 超出最后锚点：按最后一段斜率外推后封顶
+    prev_x2, prev_y2 = CALIBRATION_KNOTS[-2]
+    last_x, last_y = CALIBRATION_KNOTS[-1]
+    slope = (last_y - prev_y2) / (last_x - prev_x2)
+    return min(last_y + slope * (raw - last_x), MAX_CALIBRATED_VALUE)
+
 
 def _quantile_loss(y_true: np.ndarray, y_pred: np.ndarray, q: float) -> float:
     """分位数损失 (Pinball Loss, 用于评估验证集)"""
@@ -78,8 +113,8 @@ class ValuerModel:
         if n < MIN_SAMPLES:
             return {"error": f"样本不足: {n} < {MIN_SAMPLES}"}
 
-        # 1. log 变换价格 (长尾分布稳定)
-        y_log = np.log(np.maximum(y, 1.0))
+        # 1. 价格封顶 + log 变换 (长尾分布稳定，避免虚高标价主导)
+        y_log = np.log(np.maximum(np.minimum(y, TRAIN_PRICE_CAP), 1.0))
 
         # 2. 80/20 分割 (固定种子可复现)
         rng = np.random.default_rng(RANDOM_SEED)
@@ -265,7 +300,7 @@ def predict_value(game_id: str, features: dict) -> dict | None:
 
     return {
         "p10": float(preds[0]),
-        "p50": float(preds[1]),
+        "p50": calibrate_value(float(preds[1])),
         "p90": float(preds[2]),
     }
 
