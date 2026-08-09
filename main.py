@@ -14,9 +14,17 @@ from db import (
     upsert_detail, get_detail, get_unvalued_accounts,
     get_training_data, get_weights, get_all_weights,
 )
-from crawler.pxb7 import crawl as crawl_pxb7, check_detail as check_pxb7, fetch_detail as fetch_pxb7_detail
+from crawler.pxb7 import (
+    crawl as crawl_pxb7, check_detail as check_pxb7,
+    fetch_detail_with_status, set_min_request_interval,
+)
 from crawler.base import CrawlerError
-from parser import parse_pxb7_wuwa, parse_pxb7_genshin
+from parser import parse_pxb7_genshin
+
+# 按 game_id 分发解析器
+_PARSER_MAP = {
+    "10026": parse_pxb7_genshin,
+}
 from valuer import extract_features, train_and_save, predict_value, compute_score, is_model_ready, MIN_SAMPLES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -36,6 +44,7 @@ def load_config(path: str = "config.yaml") -> dict:
 def run_crawl_loop(config: dict):
     interval = config["crawl"]["interval_seconds"]
     max_pages = config["crawl"].get("max_pages", 3)
+    proxy = config["crawl"].get("proxy")
     while True:
         new_count = 0
         update_count = 0
@@ -43,7 +52,7 @@ def run_crawl_loop(config: dict):
         if config["sources"].get("pxb7", {}).get("enabled"):
             for game_id in config["sources"]["pxb7"]["games"]:
                 try:
-                    accounts = crawl_pxb7(game_id, max_pages=max_pages)
+                    accounts = crawl_pxb7(game_id, max_pages=max_pages, proxy=proxy)
                     for a in accounts:
                         if upsert_account(**a):
                             new_count += 1
@@ -57,8 +66,9 @@ def run_crawl_loop(config: dict):
         time.sleep(interval)
 
 
-def run_detail_check_loop():
+def run_detail_check_loop(config: dict):
     """定时轮询详情接口，检测已售出商品"""
+    proxy = config["crawl"].get("proxy")
     while True:
         products = get_active_for_check(DETAIL_CHECK_INTERVAL // 60)
         if not products:
@@ -67,7 +77,7 @@ def run_detail_check_loop():
 
         sold_count = 0
         with ThreadPoolExecutor(max_workers=DETAIL_CHECK_WORKERS) as pool:
-            futures = {pool.submit(check_pxb7, p["product_id"]): p for p in products}
+            futures = {pool.submit(check_pxb7, p["product_id"], proxy): p for p in products}
 
             for f in as_completed(futures):
                 p = futures[f]
@@ -93,65 +103,94 @@ VALUER_BATCH = 20      # 每轮处理条数
 TRAIN_INTERVAL = 86400  # 每日训练（秒）
 
 
-def _fetch_and_parse(product_id: str, detail_interval: float = 0.0) -> dict | None:
-    """?????????? parsed_data dict"""
+def _fetch_and_parse(product_id: str, game_id: str, source: str, detail_interval: float = 0.0,
+                     proxy: str | None = None) -> tuple[dict | None, str]:
+    """拉取螃蟹详情并按游戏解析；返回 (parsed_data, status)
+
+    status: "ok"=解析成功, "sold"=商品已下架, "error"=临时失败/解析失败
+    """
+    parser_fn = _PARSER_MAP.get(game_id)
+    if not parser_fn:
+        logger.warning("[valuer] 未配置解析器 game_id=%s", game_id)
+        return None, "error"
+    detail, status = fetch_detail_with_status(product_id, proxy=proxy)
+    if status == "sold":
+        return None, "sold"
+    if detail is None:
+        return None, "error"
     try:
-        detail = fetch_pxb7_detail(product_id)
-        if not detail:
-            return None
-        return parse_pxb7(detail).to_dict()
+        return parser_fn(detail).to_dict(), "ok"
     except Exception as e:
-        logger.error("???? pxb7/%s: %s", product_id, e)
-        return None
+        logger.error("[valuer] 解析失败 pxb7/%s: %s", product_id, e)
+        return None, "error"
 def run_valuer_loop(config: dict):
     """异步价值计算 worker：定期处理未估价的账号"""
     detail_interval = config["crawl"].get("detail_interval_seconds", 0.0)
+    proxy = config["crawl"].get("proxy")
+    games = []
+    for src_val in config["sources"].values():
+        if src_val.get("enabled"):
+            games.extend(src_val.get("games", []))
+
     while True:
         try:
-            pending = get_unvalued_accounts(limit=VALUER_BATCH)
-            if not pending:
-                time.sleep(VALUER_INTERVAL)
-                continue
+            processed = 0
+            for gid in games:
+                model_ready = is_model_ready(gid)
+                pending = get_unvalued_accounts(game_id=gid, limit=VALUER_BATCH,
+                                                include_existing=model_ready)
+                for acc in pending:
+                    # 模型未就绪时只积累新样本，避免对同一批账号反复抓详情
+                    if not model_ready and not acc.get("is_new"):
+                        continue
 
-            computed = 0
-            for acc in pending:
-                parsed = _fetch_and_parse(acc["product_id"], acc["game_id"], detail_interval=detail_interval)
-                if not parsed:
-                    continue
+                    parsed, parse_status = _fetch_and_parse(
+                        acc["product_id"], gid, acc["source"],
+                        detail_interval=detail_interval, proxy=proxy,
+                    )
+                    if parse_status == "sold":
+                        # 已下架账号移出待估价队列，避免反复抓取
+                        mark_sold(acc["product_id"], acc["source"])
+                        continue
+                    if not parsed:
+                        continue
 
-                features = extract_features(parsed, "pxb7", acc["price"], game_id=acc["game_id"])
+                    features = extract_features(parsed, "pxb7", acc["price"], game_id=gid)
 
-                # 预测价值（模型未训练则为 None）
-                value = None
-                score = None
-                ratio = None
-                if is_model_ready(acc["game_id"]):
-                    pred = predict_value(acc["game_id"], features)
-                    if pred:
-                        value = pred["p50"]
-                        ratio = value / acc["price"] if acc["price"] > 0 else None
-                        score = compute_score(ratio) if ratio else None
+                    # 预测价值（模型未训练则为 None）
+                    value = None
+                    score = None
+                    ratio = None
+                    if model_ready:
+                        pred = predict_value(gid, features)
+                        if pred:
+                            value = pred["p50"]
+                            ratio = value / acc["price"] if acc["price"] > 0 else None
+                            score = compute_score(ratio) if ratio else None
 
-                upsert_detail(
-                    account_id=acc["id"],
-                    game_id=acc["game_id"],
-                    source=acc["source"],
-                    parsed_data=parsed,
-                    features=features,
-                    value=value,
-                    score=score,
-                    value_ratio=ratio,
-                )
-                computed += 1
-                # 节流
-                if detail_interval > 0:
-                    time.sleep(detail_interval)
+                    upsert_detail(
+                        account_id=acc["id"],
+                        game_id=gid,
+                        source=acc["source"],
+                        parsed_data=parsed,
+                        features=features,
+                        value=value,
+                        score=score,
+                        value_ratio=ratio,
+                    )
+                    processed += 1
+                    # 节流
+                    if detail_interval > 0:
+                        time.sleep(detail_interval)
 
-            logger.info("[valuer] computed=%d/%d", computed, len(pending))
+            logger.info("[valuer] processed=%d", processed)
         except Exception as e:
             logger.error("[valuer] error: %s", e)
 
-        time.sleep(10)  # 短间隔继续处理剩余
+        if processed == 0:
+            time.sleep(VALUER_INTERVAL)  # 没有待处理账号时进入长间隔
+        else:
+            time.sleep(10)  # 短间隔继续处理剩余
 
 
 def run_train_loop():
@@ -188,6 +227,7 @@ def start_background_tasks():
     init_db()
     config = load_config()
     workers = config.get("workers", {})
+    set_min_request_interval(config["crawl"].get("min_request_interval_seconds", 60))
 
     if workers.get("crawl", True):
         crawl_thread = threading.Thread(target=run_crawl_loop, args=(config,), daemon=True)
@@ -195,7 +235,7 @@ def start_background_tasks():
         print(f"Crawler started, interval={config['crawl']['interval_seconds']}s")
 
     if workers.get("detail_check", True):
-        detail_thread = threading.Thread(target=run_detail_check_loop, daemon=True)
+        detail_thread = threading.Thread(target=run_detail_check_loop, args=(config,), daemon=True)
         detail_thread.start()
         print(f"Detail checker started, interval={DETAIL_CHECK_INTERVAL}s, workers={DETAIL_CHECK_WORKERS}")
 

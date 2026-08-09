@@ -155,7 +155,7 @@ createApp({
     const page = ref(1)
     const total = ref(0)
     const size = ref(20)
-    const sort = ref('created_at')
+    const sort = ref('score_desc')
     const filters = ref({ source: '', game_name: '', keyword: '', min_price: null, max_price: null, include_sold: false })
     const mappings = ref({ sources: {}, games: {} })
     const gameLookup = ref({})  // "source:game_id" → "游戏名"
@@ -238,6 +238,7 @@ createApp({
       if (filters.value.min_price != null) p.set('min_price', filters.value.min_price)
       if (filters.value.max_price != null) p.set('max_price', filters.value.max_price)
       if (filters.value.include_sold) p.set('include_sold', 'true')
+      p.set('sort', sort.value)
       p.set('page', page.value); p.set('size', size.value)
       try {
         const r = await (await fetch('/api/accounts?' + p)).json()

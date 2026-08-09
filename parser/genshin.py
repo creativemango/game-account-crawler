@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from .wuwa import ParsedAccount
+from .wuwa import ParsedAccount, Character, Weapon
 
 
 _GENSHIN_ATTR_MAP = {
@@ -59,7 +59,7 @@ def parse_pxb7(detail: dict) -> ParsedAccount:
                 weapon_dto = role_dto.get("weaponDTO")
                 if weapon_dto and weapon_dto.get("weaponName"):
                     weapon_refine = int(weapon_dto.get("weaponRefineNum") or 1)
-                char = ParsedAccount.Character(name=name, constellation=constellation, weapon_refine=weapon_refine)
+                char = Character(name=name, constellation=constellation, weapon_refine=weapon_refine)
                 if rarity >= 5:
                     pa.five_star_chars.append(char)
                 else:
@@ -72,5 +72,5 @@ def parse_pxb7(detail: dict) -> ParsedAccount:
                 if not name:
                     continue
                 refine = int(weapon_dto.get("weaponRefineNum") or 1)
-                pa.five_star_weapons.append(ParsedAccount.Weapon(name=name, refine=refine))
+                pa.five_star_weapons.append(Weapon(name=name, refine=refine))
     return pa

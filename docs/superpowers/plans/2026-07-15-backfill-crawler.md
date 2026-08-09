@@ -225,8 +225,7 @@ git commit -m "feat(crawler/[已移除]): crawl() 和 _crawl_async() 加 start_p
 """向前爬虫: 按源向前翻页爬取历史账号数据
 
 两个独立 CLI 脚本:
-  - python -m backfill.pxb7 --game-id 10302 --start-page 4 --max-pages 50
-  - python -m backfill.[已移除] --game-id 303 --start-page 4 --max-pages 50
+  - python -m backfill.pxb7 --game-id 10026 --start-page 4 --max-pages 50
 
 职责: 列表→详情→解析→特征→入库 (不计算价值, 交 main.py valuer_loop 补全)
 """
@@ -357,7 +356,7 @@ git commit -m "feat(backfill): 新增 common.process_account 共享编排流程"
 不计算价值 (交 main.py valuer_loop 补全)。
 
 用法:
-  uv run python -m backfill.pxb7 --game-id 10302 --start-page 4 --max-pages 50
+  uv run python -m backfill.pxb7 --game-id 10026 --start-page 4 --max-pages 50
 """
 from __future__ import annotations
 
@@ -375,7 +374,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description="螃蟹向前爬虫 (历史数据回填)")
-    parser.add_argument("--game-id", required=True, help="游戏ID (如 10302=鸣潮)")
+    parser.add_argument("--game-id", required=True, help="游戏ID (如 10026=原神)")
     parser.add_argument("--start-page", type=int, required=True, help="起始页码")
     parser.add_argument("--max-pages", type=int, required=True, help="最多翻页数")
     parser.add_argument("--page-size", type=int, default=16, help="每页条数 (默认 16)")
@@ -448,7 +447,7 @@ Expected: 显示 usage 和参数说明，无报错
 
 运行:
 ```powershell
-uv run python -m backfill.pxb7 --game-id 10302 --start-page 1 --max-pages 1
+uv run python -m backfill.pxb7 --game-id 10026 --start-page 1 --max-pages 1
 ```
 Expected: 输出 `page=1 fetched=N processed=M`，`完成: pages=1, total_fetched=N, total_processed=M`，无报错。数据库 `account_details` 表新增对应记录（`value` 为 NULL）。
 
@@ -504,7 +503,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description="螃蟹向前爬虫 (历史数据回填)")
-    parser.add_argument("--game-id", required=True, help="游戏ID (如 303=鸣潮)")
+    parser.add_argument("--game-id", required=True, help="游戏ID (如 10026=原神)")
     parser.add_argument("--start-page", type=int, required=True, help="起始页码")
     parser.add_argument("--max-pages", type=int, required=True, help="最多翻页数")
     parser.add_argument("--page-size", type=int, default=10, help="每页条数 (默认 10)")

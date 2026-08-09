@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 
 from crawler.pxb7 import fetch_detail as fetch_pxb7_detail
-from parser import parse_pxb7
+from parser import parse_pxb7_genshin
 from valuer import extract_features
 from db import get_account_id, upsert_detail
 
@@ -35,7 +35,7 @@ def process_account(source: str, product_id: str, game_id: str,
         if not detail:
             logger.warning("螃蟹详情为空: %s", product_id)
             return False
-        parsed = parse_pxb7(detail).to_dict()
+        parsed = parse_pxb7_genshin(detail).to_dict()
 
         features = extract_features(parsed, "pxb7", price, game_id=game_id)
         upsert_detail(

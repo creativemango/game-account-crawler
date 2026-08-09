@@ -3,11 +3,8 @@ sources:
     enabled: true
     name: "螃蟹"
     games:
-      - "10302"    # 鸣潮
       - "10026"    # 原神
 game_names:
-  "鸣潮":
-    pxb7: "10302"
   "原神":
     pxb7: "10026"
 
@@ -15,13 +12,15 @@ crawl:
   interval_seconds: 300  # 爬取间隔（秒）
   max_pages: 3           # 每次最多翻页数
   detail_interval_seconds: 1.5  # 详情请求间隔（秒），控制频率避免触发风控
+  min_request_interval_seconds: 0   # 全局请求最小间隔（秒），0=不限（恢复原频率）
+  # proxy: "http://127.0.0.1:7897"  # 本地代理（IP 被封时使用，需开启 Clash 全局模式）
 
 # 后台 worker 开关 (启动时控制哪些 worker 运行)
 # 默认只开爬虫和详情轮询; 价值评估和训练按需开启
 workers:
   crawl: true            # 定时爬取最新账号
   detail_check: true     # 定时轮询详情检测售出
-  valuer: false          # 价值评估 (需要模型已训练)
+  valuer: true           # 价值评估
   train: false           # 每日自动训练
 
 api:

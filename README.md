@@ -5,7 +5,7 @@
 ## 功能
 
 - **爬取**：螃蟹 HTTP API 直连
-- **结构化解析**：统一解析螃蟹数据为 `ParsedAccount`（黄数/等级/星声/浮金波纹/余波珊瑚/角色命座/武器精炼/队伍/服饰）
+- **结构化解析**：统一解析螃蟹数据为 `ParsedAccount`（黄数/等级/原石/纠缠之缘/相遇之缘/星辉/角色命座/武器精炼/队伍/服饰）
 - **价值评估**：3 个 LightGBM 分位数模型（P10/P50/P90）预测价格区间，`value_ratio = P50 / 实际价格` 量化性价比
 - **自动训练**：每日定时训练或独立 CLI 触发；冷启动时留空待回填（样本不足 `MIN_SAMPLES=200` 不训练）
 - **售出检测**：定时轮询详情接口，标记下架商品
@@ -19,7 +19,8 @@
 ├── crawler/              # 爬虫
 │   ├── pxb7.py           # 螃蟹: httpx 直连 + detailPost 接口
 ├── parser/
-│   └── wuwa.py           # 鸣潮解析: 统一 ParsedAccount 数据结构
+│   ├── genshin.py        # 原神解析: 统一 ParsedAccount 数据结构
+│   └── wuwa.py           # 共享 ParsedAccount 数据结构
 ├── valuer/
 │   ├── features.py       # 26 维特征提取
 │   └── model.py          # LightGBM 分位数回归模型
@@ -65,7 +66,7 @@ sources:
   pxb7:
     enabled: true
     name: "螃蟹"
-    games: ["10302"]      # 鸣潮
+    games: ["10026"]      # 原神
 crawl:
   interval_seconds: 300        # 爬取间隔
   max_pages: 3                 # 每次最多翻页数
@@ -80,8 +81,8 @@ workers:
   train: false           # 每日自动训练
 
 game_names:
-  "鸣潮":
-    pxb7: "10302"\n
+  "原神":
+    pxb7: "10026"
 api:
   host: "0.0.0.0"
   port: 8000
@@ -112,7 +113,7 @@ uv run uvicorn main:app --host 0.0.0.0 --port 8000
 
 ```powershell
 uv run python train.py                 # 训练所有已配置游戏
-uv run python train.py --game-id 303   # 仅训练指定游戏
+uv run python train.py --game-id 10026 # 仅训练指定游戏
 ```
 
 ### 历史数据回填
@@ -121,7 +122,7 @@ uv run python train.py --game-id 303   # 仅训练指定游戏
 
 ```powershell
 # 螃蟹回填（从第 1 页向前爬 50 页）
-uv run python -m backfill.pxb7 --game-id 10302 --start-page 1 --max-pages 50 --interval 0.5
+uv run python -m backfill.pxb7 --game-id 10026 --start-page 1 --max-pages 50 --interval 0.5
 
 ```
 
@@ -129,7 +130,7 @@ uv run python -m backfill.pxb7 --game-id 10302 --start-page 1 --max-pages 50 --i
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
-| `--game-id` | 游戏 ID（螃蟹 10302） | 必填 |
+| `--game-id` | 游戏 ID（螃蟹 10026） | 必填 |
 | `--start-page` | 起始页码 | 必填 |
 | `--max-pages` | 最多翻页数 | 必填 |
 | `--page-size` | 每页条数 | 螃蟹 16 |
@@ -151,11 +152,11 @@ uv run python -m backfill.pxb7 --game-id 10302 --start-page 1 --max-pages 50 --i
 ### 查询示例
 
 ```powershell
-# 鸣潮在售账号，按性价比降序
-curl "http://localhost:8000/api/accounts?game_name=鸣潮&sort=value_ratio_desc&size=20"
+# 原神在售账号，按性价比降序
+curl "http://localhost:8000/api/accounts?game_name=原神&sort=value_ratio_desc&size=20"
 
-# 手动训练鸣潮模型
-curl -X POST "http://localhost:8000/api/valuer/train?game_id=10302"
+# 手动训练原神模型
+curl -X POST "http://localhost:8000/api/valuer/train?game_id=10026"
 ```
 
 ## 价值模型

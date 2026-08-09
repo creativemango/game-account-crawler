@@ -44,7 +44,7 @@ def train_game(game_id: str) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="训练价值模型 (LightGBM 分位回归)")
     parser.add_argument("--game-id", default=None,
-                        help="指定游戏ID (如 303=鸣潮); 不指定则训练所有已配置游戏")
+                        help="指定游戏ID (如 10026=原神); 不指定则训练所有已配置游戏")
     args = parser.parse_args()
 
     config = load_config()

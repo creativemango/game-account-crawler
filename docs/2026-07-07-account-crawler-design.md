@@ -31,7 +31,7 @@ Content-Type: application/json
 
 {
   "query": "",
-  "gameId": "10302",
+  "gameId": "10026",
   "pageIndex": 1,
   "pageSize": 16,
   "bizProd": 1,
@@ -115,12 +115,7 @@ sources:
   pxb7:
     enabled: true
     games:
-      - "10302"  # 鸣潮
-  [已移除]:
-    enabled: true
-    games:
-      - "303"    # 鸣潮
-    platform: "6"
+      - "10026"  # 原神
 
 crawl:
   interval_seconds: 300  # 5 分钟

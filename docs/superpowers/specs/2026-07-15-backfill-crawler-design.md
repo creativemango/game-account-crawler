@@ -70,7 +70,7 @@ CLI 脚本，负责螃蟹源特定的列表翻页 + 调 `process_account`。复�
 
 | 参数 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `--game-id` | 是 | - | 游戏ID（螃蟹如 `10302`，螃蟹如 `303`） |
+| `--game-id` | 是 | - | 游戏ID（如 `10026`=原神） |
 | `--start-page` | 是 | - | 起始页码 |
 | `--max-pages` | 是 | - | 最多翻页数（防失控） |
 | `--page-size` | 否 | 源默认 | 每页条数（螃蟹 16，螃蟹 10，与现有 crawl 一致） |
@@ -79,11 +79,8 @@ CLI 脚本，负责螃蟹源特定的列表翻页 + 调 `process_account`。复�
 ### 调用示例
 
 ```powershell
-# 螃蟹鸣潮：从第 4 页爬 50 页（约 800 条）
-uv run python -m backfill.pxb7 --game-id 10302 --start-page 4 --max-pages 50
-
-# 螃蟹鸣潮：从第 4 页爬 50 页
-uv run python -m backfill.[已移除] --game-id 303 --start-page 4 --max-pages 50 --platform 6
+# 螃蟹原神：从第 4 页爬 50 页（约 800 条）
+uv run python -m backfill.pxb7 --game-id 10026 --start-page 4 --max-pages 50
 ```
 
 ## 翻页行为

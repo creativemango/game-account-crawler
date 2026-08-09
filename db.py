@@ -308,21 +308,27 @@ def get_detail(account_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def get_unvalued_accounts(game_id: str = None, limit: int = 100) -> list[dict]:
+def get_unvalued_accounts(game_id: str = None, limit: int = 100,
+                          include_existing: bool = False) -> list[dict]:
     """获取有 price 但未计算价值的账号（用于异步计算）"""
     conn = get_db()
+    detail_cond = "d.id IS NULL"
+    if include_existing:
+        # 模型就绪后，已处理但 value 为空的账号也要回填价值
+        detail_cond = "(d.id IS NULL OR d.value IS NULL)"
     sql = """
-        SELECT a.id, a.source, a.game_id, a.product_id, a.price, a.raw_data
+        SELECT a.id, a.source, a.game_id, a.product_id, a.price, a.raw_data,
+               (d.id IS NULL) AS is_new
         FROM accounts a
         LEFT JOIN account_details d ON a.id = d.account_id
         WHERE a.is_active=1 AND a.price IS NOT NULL AND a.price > 0
-          AND d.id IS NULL
-    """
+          AND %s
+    """ % detail_cond
     params = []
     if game_id:
         sql += " AND a.game_id=?"
         params.append(game_id)
-    sql += " LIMIT ?"
+    sql += " ORDER BY a.id DESC LIMIT ?"
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     conn.close()

@@ -8,7 +8,7 @@
 run_valuer_loop 通过 get_unvalued_accounts 异步补全。
 
 用法:
-    uv run python -m backfill.pxb7 --game-id 10302 --start-page 4 --max-pages 50
+    uv run python -m backfill.pxb7 --game-id 10026 --start-page 4 --max-pages 50
 """
 import argparse
 import logging
@@ -27,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="螃蟹(pxb7)向前爬虫 - 从指定页码向前翻页爬取历史账号数据"
     )
-    parser.add_argument("--game-id", required=True, help="游戏ID (如 10302=鸣潮)")
+    parser.add_argument("--game-id", required=True, help="游戏ID (如 10026=原神)")
     parser.add_argument("--start-page", type=int, required=True, help="起始页码")
     parser.add_argument("--max-pages", type=int, required=True, help="最多翻页数 (防失控)")
     parser.add_argument("--page-size", type=int, default=16, help="每页条数 (默认 16)")
